@@ -263,10 +263,16 @@ export default function Home() {
     if (showIdr) return formatIdr(idrValue);
     return formatUsd(usdtValue);
   }, [showIdr]);
-  const formatSignedBalance = useCallback((usdtValue?: string, idrValue?: string) => {
-    if (showIdr) return formatIdr(idrValue);
-    return formatSignedUsd(usdtValue);
-  }, [showIdr]);
+  const idrRate = Number(balanceSummary?.usdt_idr_rate || 0);
+
+  const formatAnySignedUsd = useCallback((value?: string) => {
+    if (!value) return "-";
+    if (showIdr && idrRate) {
+      return formatIdr(String(Number(value) * idrRate));
+    }
+    return formatSignedUsd(value);
+  }, [showIdr, idrRate]);
+
   return (
     <main className="terminal">
       <header className="topbar">
@@ -298,30 +304,30 @@ export default function Home() {
       ) : null}
 
       <section className="summary-grid">
-        <article className="metric hero-metric">
+        <article className="metric glass hero-metric">
           <span>Wallet ({balanceCurrency})</span>
           <strong>{formatBalance(balanceSummary?.wallet_usdt, balanceSummary?.wallet_idr)}</strong>
         </article>
-        <article className="metric">
+        <article className="metric glass">
           <span>Available</span>
           <strong>{formatBalance(balanceSummary?.available_usdt, balanceSummary?.available_idr)}</strong>
         </article>
-        <article className="metric">
+        <article className="metric glass">
           <span>Floating PnL</span>
-          <strong className={totalUnrealizedPnl >= 0 ? "up" : "down"}>{formatSignedUsd(String(totalUnrealizedPnl))}</strong>
+          <strong className={totalUnrealizedPnl >= 0 ? "up" : "down"}>{formatAnySignedUsd(String(totalUnrealizedPnl))}</strong>
         </article>
-        <article className="metric">
+        <article className="metric glass">
           <span>Active Positions</span>
           <strong>{openPositions.length}</strong>
         </article>
-        <article className="metric">
+        <article className="metric glass">
           <span>{status?.symbol || selectedSymbol}</span>
           <strong className="price-value">{formatPrice(status?.price?.price)}</strong>
         </article>
       </section>
 
       <section className="workspace">
-        <section className="panel positions-panel">
+        <section className="panel glass positions-panel">
           <header className="panel-head">
             <div>
               <h2>Open Positions</h2>
@@ -353,7 +359,7 @@ export default function Home() {
                     <span>{formatNumber(position.positionAmt)}</span>
                     <span>{formatPrice(position.entryPrice)}</span>
                     <span>{formatPrice(position.markPrice)}</span>
-                    <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(pnlValue)}</span>
+                    <span className={pnl >= 0 ? "up" : "down"}>{formatAnySignedUsd(pnlValue)}</span>
                     <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.roePercent ?? position.pnlPercent)}</span>
                     <span>{formatPrice(position.takeProfitPrice)}</span>
                     <span>{formatPrice(position.stopLossPrice)}</span>
@@ -367,7 +373,7 @@ export default function Home() {
           )}
         </section>
 
-        <section className="panel account-panel">
+        <section className="panel glass account-panel">
           <header className="panel-head balance-headline">
             <div>
               <h2>Account</h2>
@@ -401,7 +407,7 @@ export default function Home() {
                     <strong>{balance.asset}</strong>
                     <span>{formatBalance(balance.walletUsdt ?? balance.walletBalance ?? balance.free, balance.walletIdr)}</span>
                     <span>{formatBalance(balance.availableUsdt ?? balance.availableBalance ?? balance.free, balance.availableIdr)}</span>
-                    <span className={toneClass(showIdr ? balance.unrealizedIdr : unrealizedValue)}>{formatSignedBalance(unrealizedValue, balance.unrealizedIdr)}</span>
+                    <span className={toneClass(showIdr ? balance.unrealizedIdr : unrealizedValue)}>{formatAnySignedUsd(unrealizedValue)}</span>
                   </div>
                 );
               })}
@@ -411,7 +417,7 @@ export default function Home() {
           )}
         </section>
 
-        <section className="panel signal-panel">
+        <section className="panel glass signal-panel">
           <header className="panel-head">
             <div>
               <h2>Signal</h2>
