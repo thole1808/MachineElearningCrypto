@@ -8,3 +8,5 @@ node_modules/
 .next/
 dashboard/node_modules/
 dashboard/.next/
+.env
+*.pem
