@@ -44,6 +44,7 @@ type OpenPosition = {
   leverage: string;
   marginType?: string;
   pnlPercent?: string;
+  roePercent?: string;
   positionSide?: string;
 };
 
@@ -456,7 +457,7 @@ export default function Home() {
                   <span>{formatPrice(position.entryPrice)}</span>
                   <span>{formatPrice(position.markPrice)}</span>
                   <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(pnlValue)}</span>
-                  <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.pnlPercent)}</span>
+                  <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.roePercent ?? position.pnlPercent)}</span>
                   <span>{formatPrice(position.liquidationPrice)}</span>
                 </div>
               );
@@ -471,11 +472,15 @@ export default function Home() {
         <header className="panel-head">
           <div>
             <h2>Auto Signal Scanner (Real-time)</h2>
-            <p>Sinyal scalping berjalan dari Python backend. Otomatis refresh tiap 5 detik.</p>
+            <p>Sinyal scalping pair yang sedang dipilih. Otomatis refresh tiap {realtimeRefreshMs / 1000} detik.</p>
           </div>
         </header>
         {signalError ? <div className="alert compact">{signalError}</div> : null}
         <div className="candle-stats" style={{ marginTop: "16px" }}>
+          <div>
+            <span>Pair</span>
+            <strong>{autoSignal?.symbol || selectedSymbol}</strong>
+          </div>
           <div>
             <span>Sinyal</span>
             <strong className={autoSignal?.signal === "BUY" ? "up" : autoSignal?.signal === "SELL" ? "down" : ""}>

@@ -355,6 +355,9 @@ class BinanceClient:
             entry = Decimal(str(position.get("entryPrice", "0")))
             mark = Decimal(str(position.get("markPrice", "0")))
             amount = Decimal(str(position.get("positionAmt", "0")))
+            unrealized_profit = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
+            leverage = Decimal(str(position.get("leverage", os.getenv("DEFAULT_LEVERAGE", "1"))))
+            notional = abs(Decimal(str(position.get("notional", "0"))))
             if entry > 0 and mark > 0:
                 if amount > 0:
                     pnl_percent = ((mark - entry) / entry) * Decimal("100")
@@ -363,6 +366,9 @@ class BinanceClient:
                     pnl_percent = ((entry - mark) / entry) * Decimal("100")
                     position["tpHitDirection"] = "mark <= TP" if mark <= entry else "mark > TP"
                 position["pnlPercent"] = str(pnl_percent)
+            if notional > 0 and leverage > 0:
+                initial_margin = notional / leverage
+                position["roePercent"] = str((unrealized_profit / initial_margin) * Decimal("100"))
         return positions
 
     def has_open_position(self) -> bool:
