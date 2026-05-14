@@ -26,9 +26,6 @@ type ApiResponse = {
   error?: string;
 };
 
-const botApiUrl =
-  process.env.NEXT_PUBLIC_BOT_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8765";
-
 export default function Home() {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
   const [error, setError] = useState("");
@@ -47,7 +44,7 @@ export default function Home() {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(`${botApiUrl}/api/binance/status`);
+      const response = await fetch("/api/binance/status");
       const body = (await response.json()) as ApiResponse;
       if (!response.ok || !body.ok || !body.binance) {
         throw new Error(body.error || "Backend belum bisa membaca status Binance.");
@@ -67,7 +64,7 @@ export default function Home() {
           <p className="eyebrow">Local Binance Testnet Monitor</p>
           <h1>Machine Elearning Crypto</h1>
           <p className="subcopy">
-            Pantau koneksi bot lokal, harga simbol, dan saldo testnet dari dashboard Next.js.
+            Pantau koneksi bot lokal, harga simbol, API key, private key RSA, dan saldo Binance.
           </p>
         </div>
         <button className="primary" disabled={loading} onClick={checkBinance}>
@@ -106,7 +103,7 @@ export default function Home() {
           <dl>
             <div>
               <dt>Backend</dt>
-              <dd>{botApiUrl}</dd>
+              <dd>Next.js proxy ke Python backend</dd>
             </div>
             <div>
               <dt>Binance URL</dt>

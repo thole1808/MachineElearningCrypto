@@ -14,27 +14,26 @@ Buka:
 http://127.0.0.1:8765
 ```
 
-## Dashboard Next.js
+## Jalankan Webbase
 
-Dashboard web berada di folder `dashboard/`.
+Cara paling mudah: jalankan backend Python dan dashboard Next.js sekaligus.
 
 ```bash
-cd dashboard
-npm install
-cp .env.local.example .env.local
-npm run dev
+./start-web.sh
 ```
 
 Buka:
 
 ```text
-http://127.0.0.1:3000
+http://127.0.0.1:3010
 ```
 
-Pastikan backend Python tetap berjalan di terminal lain:
+Kalau ingin menjalankan manual:
 
 ```bash
 python3 app.py
+cd dashboard
+npm run dev
 ```
 
 ## Pakai OpenAI API
