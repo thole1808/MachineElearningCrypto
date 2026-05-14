@@ -272,14 +272,23 @@ class BinanceClient:
                 ]
         return result
 
-    def has_open_position(self) -> bool:
+    def open_positions(self) -> list[dict]:
         if self.dry_run():
-            return False
+            return []
         account = self.signed_get("/fapi/v2/account")
-        for position in account.get("positions", []):
+        return [pos for pos in account.get("positions", []) if abs(float(pos.get("positionAmt", "0"))) > 0]
+
+    def has_open_position(self) -> bool:
+        for position in self.open_positions():
             if position.get("symbol") == self.symbol and abs(float(position.get("positionAmt", "0"))) > 0:
                 return True
         return False
+
+    def has_reached_max_open_positions(self) -> bool:
+        max_positions = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
+        if max_positions <= 0:
+            return False
+        return len(self.open_positions()) >= max_positions
 
     def set_leverage(self, leverage: int | None = None) -> dict:
         if not self.is_futures():
@@ -305,8 +314,8 @@ class BinanceClient:
         return self.signed_post("/fapi/v1/order", params)
 
     def place_tp_sl_orders(self, entry_side: str, entry_price: Decimal) -> dict:
-        tp_percent = Decimal(os.getenv("TP_PERCENT", "1"))
-        sl_percent = Decimal(os.getenv("SL_PERCENT", "0.5"))
+        tp_percent = Decimal(os.getenv("TP_PERCENT", os.getenv("TAKE_PROFIT_PERCENT", "1")))
+        sl_percent = Decimal(os.getenv("SL_PERCENT", os.getenv("STOP_LOSS_PERCENT", "0.5")))
         if tp_percent <= 0 or sl_percent <= 0:
             return {"skipped": True, "reason": "TP_PERCENT / SL_PERCENT tidak aktif."}
         entry_side = entry_side.upper()
@@ -369,6 +378,8 @@ class BinanceClient:
             raise ValueError("Webhook harus berisi side/signal: BUY, SELL, LONG, atau SHORT.")
         if env_bool("PREVENT_DOUBLE_POSITION", "true") and self.has_open_position():
             return {"accepted": False, "reason": f"Masih ada posisi terbuka di {self.symbol}. Entry baru dibatalkan.", "symbol": self.symbol}
+        if self.has_reached_max_open_positions():
+            return {"accepted": False, "reason": "Batas MAX_OPEN_POSITIONS tercapai. Entry baru dibatalkan.", "symbol": self.symbol}
         leverage = int(payload.get("leverage", os.getenv("DEFAULT_LEVERAGE", "3")))
         usdt_amount = Decimal(str(payload.get("usdt", os.getenv("ORDER_USDT", "5"))))
         quantity = self.calculate_quantity(usdt_amount)

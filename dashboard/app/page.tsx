@@ -8,6 +8,17 @@ type Balance = {
   locked: string;
 };
 
+type OpenPosition = {
+  symbol: string;
+  positionAmt: string;
+  entryPrice: string;
+  markPrice?: string;
+  unRealizedProfit: string;
+  liquidationPrice?: string;
+  leverage: string;
+  marginType?: string;
+};
+
 type BinanceStatus = {
   mode: string;
   symbol: string;
@@ -18,6 +29,7 @@ type BinanceStatus = {
   server_time?: { serverTime: number };
   price?: { symbol: string; price: string };
   balances?: Balance[];
+  open_positions?: OpenPosition[];
 };
 
 type ApiResponse = {
@@ -96,6 +108,15 @@ function formatNumber(value?: string) {
   return Number(value).toLocaleString("en-US", {
     maximumFractionDigits: 6,
   });
+}
+
+function formatSignedUsd(value?: string) {
+  if (!value) return "-";
+  const number = Number(value);
+  return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} USDT`;
 }
 
 function formatClock(value?: number) {
@@ -317,6 +338,8 @@ export default function Home() {
   }, [status]);
 
   const lastCandle = candles.at(-1);
+  const openPositions = status?.open_positions || [];
+  const totalUnrealizedPnl = openPositions.reduce((total, position) => total + Number(position.unRealizedProfit || 0), 0);
   const candleDirection =
     lastCandle && Number(lastCandle.close) >= Number(lastCandle.open) ? "up" : "down";
   const visibleSymbols = useMemo(() => {
@@ -424,6 +447,53 @@ export default function Home() {
           <span>Key Type</span>
           <strong>{status?.key_type?.toUpperCase() || "-"}</strong>
         </article>
+        <article className="metric">
+          <span>Posisi Aktif</span>
+          <strong>{openPositions.length}</strong>
+        </article>
+        <article className="metric">
+          <span>Floating PnL</span>
+          <strong className={totalUnrealizedPnl >= 0 ? "up" : "down"}>{formatSignedUsd(String(totalUnrealizedPnl))}</strong>
+        </article>
+      </section>
+
+      <section className="panel positions-panel">
+        <header className="panel-head">
+          <div>
+            <h2>Posisi Aktif</h2>
+            <p>Hanya menampilkan pair Futures yang benar-benar sedang masuk posisi.</p>
+          </div>
+        </header>
+        {openPositions.length ? (
+          <div className="positions-table">
+            <div className="positions-row positions-head">
+              <span>Pair</span>
+              <span>Side</span>
+              <span>Qty</span>
+              <span>Entry</span>
+              <span>Mark</span>
+              <span>PnL</span>
+              <span>Liq.</span>
+            </div>
+            {openPositions.map((position) => {
+              const amount = Number(position.positionAmt);
+              const pnl = Number(position.unRealizedProfit || 0);
+              return (
+                <div className="positions-row" key={position.symbol}>
+                  <strong>{position.symbol}</strong>
+                  <span className={amount >= 0 ? "up" : "down"}>{amount >= 0 ? "LONG" : "SHORT"}</span>
+                  <span>{formatNumber(position.positionAmt)}</span>
+                  <span>{formatPrice(position.entryPrice)}</span>
+                  <span>{formatPrice(position.markPrice)}</span>
+                  <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(position.unRealizedProfit)}</span>
+                  <span>{formatPrice(position.liquidationPrice)}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="empty">Belum ada posisi aktif yang terbaca.</p>
+        )}
       </section>
 
       <section className="chart-panel">

@@ -153,6 +153,16 @@ dt {
   font-size: 24px;
 }
 
+.metric .up,
+.positions-row .up {
+  color: #12936f;
+}
+
+.metric .down,
+.positions-row .down {
+  color: #d94a4a;
+}
+
 .price-value {
   font-size: 22px;
   line-height: 1.12;
@@ -166,6 +176,44 @@ dt {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
+}
+
+.positions-panel {
+  min-height: 0;
+  margin-top: 14px;
+}
+
+.positions-table {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.positions-row {
+  display: grid;
+  grid-template-columns: 112px 76px 100px 112px 112px 128px 112px;
+  min-width: 752px;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.positions-row:first-child {
+  border-top: 0;
+}
+
+.positions-head {
+  background: #fbfcfc;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.positions-row span,
+.positions-row strong {
+  overflow-wrap: anywhere;
 }
 
 .panel-head {
