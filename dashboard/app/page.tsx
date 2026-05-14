@@ -4,8 +4,33 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Balance = {
   asset: string;
-  free: string;
-  locked: string;
+  walletBalance?: string;
+  availableBalance?: string;
+  unrealizedProfit?: string;
+  marginBalance?: string;
+  maxWithdrawAmount?: string;
+  walletUsdt?: string;
+  availableUsdt?: string;
+  marginUsdt?: string;
+  unrealizedUsdt?: string;
+  walletIdr?: string;
+  availableIdr?: string;
+  marginIdr?: string;
+  unrealizedIdr?: string;
+  free?: string;
+  locked?: string;
+};
+
+type BalanceSummary = {
+  wallet_usdt: string;
+  available_usdt: string;
+  margin_usdt: string;
+  unrealized_usdt: string;
+  usdt_idr_rate?: string | null;
+  wallet_idr?: string;
+  available_idr?: string;
+  margin_idr?: string;
+  unrealized_idr?: string;
 };
 
 type OpenPosition = {
@@ -29,32 +54,13 @@ type BinanceStatus = {
   server_time?: { serverTime: number };
   price?: { symbol: string; price: string };
   balances?: Balance[];
+  balance_summary?: BalanceSummary;
   open_positions?: OpenPosition[];
 };
 
 type ApiResponse = {
   ok: boolean;
   binance?: BinanceStatus;
-  error?: string;
-};
-
-type Candle = {
-  open_time: number;
-  open: string;
-  high: string;
-  low: string;
-  close: string;
-  volume: string;
-  close_time: number;
-};
-
-type KlinesResponse = {
-  ok: boolean;
-  market?: {
-    symbol: string;
-    interval: string;
-    candles: Candle[];
-  };
   error?: string;
 };
 
@@ -92,8 +98,9 @@ type AutoSignalResponse = {
   error?: string;
 };
 
-const intervals = ["1m", "5m", "15m", "1h"] as const;
 const quoteFilters = ["USDT", "USDC", "BTC", "ETH", "BNB"] as const;
+const defaultSymbol = "SOLUSDT";
+type BalanceCurrency = "USDT" | "IDR";
 
 function formatPrice(value?: string) {
   if (!value) return "-";
@@ -114,100 +121,38 @@ function formatSignedUsd(value?: string) {
   if (!value) return "-";
   const number = Number(value);
   return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 0,
   })} USDT`;
 }
 
-function formatClock(value?: number) {
+function formatUsd(value?: string) {
   if (!value) return "-";
-  return new Intl.DateTimeFormat("id-ID", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
+  return `${Number(value).toLocaleString("en-US", {
+    maximumFractionDigits: 0,
+  })} USDT`;
 }
 
-function CandleChart({ candles }: { candles: Candle[] }) {
-  const width = 980;
-  const height = 360;
-  const padding = { top: 18, right: 82, bottom: 28, left: 14 };
-  const plotWidth = width - padding.left - padding.right;
-  const plotHeight = height - padding.top - padding.bottom;
-  const values = candles.flatMap((candle) => [Number(candle.high), Number(candle.low)]);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const xStep = plotWidth / Math.max(candles.length, 1);
-  const bodyWidth = Math.max(3, Math.min(10, xStep * 0.62));
-
-  const y = (price: number) => padding.top + ((max - price) / range) * plotHeight;
-  const lastClose = Number(candles.at(-1)?.close || 0);
-  const priceLines = [max, max - range * 0.25, max - range * 0.5, max - range * 0.75, min];
-
-  if (!candles.length) {
-    return <div className="chart-empty">Candle belum tersedia.</div>;
-  }
-
-  return (
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Candlestick chart">
-      <rect x="0" y="0" width={width} height={height} rx="8" />
-      {priceLines.map((line) => (
-        <g key={line}>
-          <line x1={padding.left} x2={width - padding.right + 18} y1={y(line)} y2={y(line)} className="gridline" />
-          <text x={width - padding.right + 28} y={y(line) + 4} className="axis-label">
-            {formatPrice(String(line))}
-          </text>
-        </g>
-      ))}
-      {candles.map((candle, index) => {
-        const open = Number(candle.open);
-        const close = Number(candle.close);
-        const high = Number(candle.high);
-        const low = Number(candle.low);
-        const x = padding.left + index * xStep + xStep / 2;
-        const bodyTop = Math.min(y(open), y(close));
-        const bodyHeight = Math.max(1, Math.abs(y(open) - y(close)));
-        const isUp = close >= open;
-        const isLast = index === candles.length - 1;
-
-        return (
-          <g key={`${candle.open_time}-${index}`} className={isUp ? "candle up" : "candle down"}>
-            <line x1={x} x2={x} y1={y(high)} y2={y(low)} />
-            <rect
-              x={x - bodyWidth / 2}
-              y={bodyTop}
-              width={bodyWidth}
-              height={bodyHeight}
-              rx="1.5"
-              className={isLast ? "running" : ""}
-            />
-          </g>
-        );
-      })}
-      <line x1={padding.left} x2={width - padding.right + 18} y1={y(lastClose)} y2={y(lastClose)} className="last-price" />
-      <text x={width - padding.right + 28} y={y(lastClose) + 4} className="last-label">
-        {formatPrice(String(lastClose))}
-      </text>
-    </svg>
-  );
+function formatIdr(value?: string) {
+  if (!value) return "-";
+  return Number(value).toLocaleString("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  });
 }
 
 export default function Home() {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
-  const [candles, setCandles] = useState<Candle[]>([]);
   const [symbols, setSymbols] = useState<MarketSymbol[]>([]);
-  const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
+  const [selectedSymbol, setSelectedSymbol] = useState(defaultSymbol);
   const [search, setSearch] = useState("");
   const [quoteFilter, setQuoteFilter] = useState<(typeof quoteFilters)[number]>("USDT");
-  const [interval, setIntervalValue] = useState<(typeof intervals)[number]>("1m");
   const [error, setError] = useState("");
-  const [chartError, setChartError] = useState("");
   const [symbolsError, setSymbolsError] = useState("");
   const [signalError, setSignalError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [chartLoading, setChartLoading] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
 
   const serverTime = useMemo(() => {
@@ -236,28 +181,6 @@ export default function Home() {
       setLoading(false);
     }
   }, [selectedSymbol]);
-
-  const loadCandles = useCallback(async (nextInterval = interval) => {
-    setChartLoading(true);
-    setChartError("");
-    try {
-      const query = new URLSearchParams({
-        symbol: selectedSymbol,
-        interval: nextInterval,
-        limit: "120",
-      });
-      const response = await fetch(`/api/binance/klines?${query.toString()}`);
-      const body = (await response.json()) as KlinesResponse;
-      if (!response.ok || !body.ok || !body.market) {
-        throw new Error(body.error || "Backend belum bisa membaca candle Binance.");
-      }
-      setCandles(body.market.candles);
-    } catch (caught) {
-      setChartError(caught instanceof Error ? caught.message : "Terjadi error saat membaca candle.");
-    } finally {
-      setChartLoading(false);
-    }
-  }, [interval, selectedSymbol]);
 
   const loadSymbols = useCallback(async () => {
     setSymbolsError("");
@@ -290,34 +213,30 @@ export default function Home() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
-      loadCandles();
       loadSymbols();
       loadAutoSignal();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadCandles, loadSymbols, loadAutoSignal]);
+  }, [checkBinance, loadSymbols, loadAutoSignal]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
-      loadCandles(interval);
       loadAutoSignal();
     }, 5000);
 
     return () => window.clearInterval(timer);
-  }, [checkBinance, interval, loadCandles, loadAutoSignal]);
+  }, [checkBinance, loadAutoSignal]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setCandles([]);
       checkBinance();
-      loadCandles(interval);
       loadAutoSignal();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, interval, loadCandles, selectedSymbol, loadAutoSignal]);
+  }, [checkBinance, selectedSymbol, loadAutoSignal]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -337,11 +256,19 @@ export default function Home() {
     return messages;
   }, [status]);
 
-  const lastCandle = candles.at(-1);
   const openPositions = status?.open_positions || [];
+  const futuresBalances = status?.balances || [];
+  const balanceSummary = status?.balance_summary;
   const totalUnrealizedPnl = openPositions.reduce((total, position) => total + Number(position.unRealizedProfit || 0), 0);
-  const candleDirection =
-    lastCandle && Number(lastCandle.close) >= Number(lastCandle.open) ? "up" : "down";
+  const showIdr = balanceCurrency === "IDR";
+  const formatBalance = useCallback((usdtValue?: string, idrValue?: string) => {
+    if (showIdr) return formatIdr(idrValue);
+    return formatUsd(usdtValue);
+  }, [showIdr]);
+  const formatSignedBalance = useCallback((usdtValue?: string, idrValue?: string) => {
+    if (showIdr) return formatIdr(idrValue);
+    return formatSignedUsd(usdtValue);
+  }, [showIdr]);
   const visibleSymbols = useMemo(() => {
     const needle = search.trim().toUpperCase();
     return symbols
@@ -360,7 +287,7 @@ export default function Home() {
           <p className="eyebrow">Local Binance Testnet Monitor</p>
           <h1>Machine Elearning Crypto</h1>
           <p className="subcopy">
-            Pantau koneksi bot lokal, pilih pair Binance, baca candle berjalan, dan siapkan tools trading sendiri.
+            Pantau koneksi bot lokal, posisi Futures aktif, saldo, dan sinyal scalping otomatis.
           </p>
         </div>
         <button className="primary" disabled={loading} onClick={checkBinance}>
@@ -387,7 +314,7 @@ export default function Home() {
         <header className="panel-head">
           <div>
             <h2>Market Scanner</h2>
-            <p>Pilih pair Spot Binance. Chart dan harga otomatis mengikuti symbol pilihan.</p>
+            <p>Pilih pair Binance untuk cek harga dan sinyal otomatis.</p>
           </div>
           <input
             className="search"
@@ -455,6 +382,18 @@ export default function Home() {
           <span>Floating PnL</span>
           <strong className={totalUnrealizedPnl >= 0 ? "up" : "down"}>{formatSignedUsd(String(totalUnrealizedPnl))}</strong>
         </article>
+        <article className="metric">
+          <span>Futures Wallet ({balanceCurrency})</span>
+          <strong>{formatBalance(balanceSummary?.wallet_usdt, balanceSummary?.wallet_idr)}</strong>
+        </article>
+        <article className="metric">
+          <span>Available ({balanceCurrency})</span>
+          <strong>{formatBalance(balanceSummary?.available_usdt, balanceSummary?.available_idr)}</strong>
+        </article>
+        <article className="metric">
+          <span>Margin ({balanceCurrency})</span>
+          <strong>{formatBalance(balanceSummary?.margin_usdt, balanceSummary?.margin_idr)}</strong>
+        </article>
       </section>
 
       <section className="panel positions-panel">
@@ -494,67 +433,6 @@ export default function Home() {
         ) : (
           <p className="empty">Belum ada posisi aktif yang terbaca.</p>
         )}
-      </section>
-
-      <section className="chart-panel">
-        <header className="panel-head">
-          <div>
-            <h2>Live Candle Chart</h2>
-            <p>{status?.symbol || selectedSymbol} berjalan, refresh otomatis tiap 5 detik.</p>
-          </div>
-          <div className="toolbar">
-            {intervals.map((item) => (
-              <button
-                className={item === interval ? "chip active" : "chip"}
-                key={item}
-                type="button"
-                onClick={() => {
-                  setIntervalValue(item);
-                  loadCandles(item);
-                }}
-              >
-                {item}
-              </button>
-            ))}
-            <button className="chip" disabled={chartLoading} type="button" onClick={() => loadCandles()}>
-              {chartLoading ? "Loading" : "Refresh"}
-            </button>
-          </div>
-        </header>
-
-        {chartError ? <div className="alert compact">{chartError}</div> : null}
-        <CandleChart candles={candles} />
-
-        <div className="candle-stats">
-          <div>
-            <span>Running Candle</span>
-            <strong className={candleDirection}>{lastCandle ? candleDirection.toUpperCase() : "-"}</strong>
-          </div>
-          <div>
-            <span>Open</span>
-            <strong>{formatPrice(lastCandle?.open)}</strong>
-          </div>
-          <div>
-            <span>High</span>
-            <strong>{formatPrice(lastCandle?.high)}</strong>
-          </div>
-          <div>
-            <span>Low</span>
-            <strong>{formatPrice(lastCandle?.low)}</strong>
-          </div>
-          <div>
-            <span>Close</span>
-            <strong>{formatPrice(lastCandle?.close)}</strong>
-          </div>
-          <div>
-            <span>Volume</span>
-            <strong>{formatNumber(lastCandle?.volume)}</strong>
-          </div>
-          <div>
-            <span>Update</span>
-            <strong>{formatClock(lastCandle?.close_time)}</strong>
-          </div>
-        </div>
       </section>
 
       <section className="panel" style={{ marginTop: "24px", marginBottom: "24px" }}>
@@ -619,19 +497,48 @@ export default function Home() {
         </article>
 
         <article className="panel">
-          <h2>Saldo Binance</h2>
-          {status?.balances?.length ? (
-            <div className="table">
-              {status.balances.map((balance) => (
-                <div className="row" key={balance.asset}>
-                  <strong>{balance.asset}</strong>
-                  <span>Free {balance.free}</span>
-                  <span>Locked {balance.locked}</span>
-                </div>
+          <header className="panel-head balance-headline">
+            <div>
+              <h2>Saldo Futures</h2>
+              <p>Rate USDT/IDR: {formatIdr(balanceSummary?.usdt_idr_rate || undefined)}</p>
+            </div>
+            <div className="segmented" aria-label="Pilih mata uang saldo">
+              {(["USDT", "IDR"] as const).map((currency) => (
+                <button
+                  className={balanceCurrency === currency ? "active" : ""}
+                  key={currency}
+                  type="button"
+                  onClick={() => setBalanceCurrency(currency)}
+                >
+                  {currency}
+                </button>
               ))}
             </div>
+          </header>
+          {futuresBalances.length ? (
+            <div className="balance-table">
+              <div className="balance-row balance-head">
+                <span>Asset</span>
+                <span>Wallet</span>
+                <span>Available</span>
+                <span>Unrealized</span>
+                <span>Margin</span>
+              </div>
+              {futuresBalances.map((balance) => {
+                const unrealized = Number(balance.unrealizedUsdt || balance.unrealizedProfit || 0);
+                return (
+                  <div className="balance-row" key={balance.asset}>
+                    <strong>{balance.asset}</strong>
+                    <span>{formatBalance(balance.walletUsdt ?? balance.walletBalance ?? balance.free, balance.walletIdr)}</span>
+                    <span>{formatBalance(balance.availableUsdt ?? balance.availableBalance ?? balance.free, balance.availableIdr)}</span>
+                    <span className={unrealized >= 0 ? "up" : "down"}>{formatSignedBalance(balance.unrealizedUsdt || balance.unrealizedProfit || "0", balance.unrealizedIdr)}</span>
+                    <span>{formatBalance(balance.marginUsdt ?? balance.marginBalance ?? balance.locked, balance.marginIdr)}</span>
+                  </div>
+                );
+              })}
+            </div>
           ) : (
-            <p className="empty">Tidak ada saldo spot non-zero yang terbaca.</p>
+            <p className="empty">Tidak ada saldo Futures non-zero yang terbaca.</p>
           )}
         </article>
       </section>

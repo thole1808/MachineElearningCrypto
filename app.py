@@ -84,6 +84,14 @@ class BinanceClient:
         request = urllib.request.Request(url, method="GET")
         return self.fetch_json(request)
 
+    def public_get_url(self, base_url: str, path: str, params: dict[str, str] | None = None) -> dict | list:
+        query = urllib.parse.urlencode(params or {})
+        url = f"{base_url.rstrip('/')}{path}"
+        if query:
+            url = f"{url}?{query}"
+        request = urllib.request.Request(url, method="GET")
+        return self.fetch_json(request)
+
     def signed_get(self, path: str, params: dict[str, str] | None = None) -> dict:
         if not self.api_key:
             raise ValueError("BINANCE_API_KEY belum diisi.")
@@ -193,6 +201,72 @@ class BinanceClient:
         payload = self.public_get(path, {"symbol": self.symbol})
         return Decimal(str(payload["price"]))
 
+    def asset_usdt_price(self, asset: str) -> Decimal:
+        clean_asset = asset.strip().upper()
+        if clean_asset in {"USDT", "FDUSD", "USDC"}:
+            return Decimal("1")
+        symbol = f"{clean_asset}USDT"
+        try:
+            payload = self.public_get("/fapi/v1/ticker/price" if self.is_futures() else "/api/v3/ticker/price", {"symbol": symbol})
+        except Exception:
+            payload = self.public_get_url("https://api.binance.com", "/api/v3/ticker/price", {"symbol": symbol})
+        return Decimal(str(payload["price"]))
+
+    def usdt_idr_rate(self) -> Decimal | None:
+        configured = os.getenv("USDT_IDR_RATE", "").strip()
+        if configured:
+            return Decimal(configured)
+        try:
+            payload = self.public_get_url("https://api.binance.com", "/api/v3/ticker/price", {"symbol": "USDTIDR"})
+            return Decimal(str(payload["price"]))
+        except Exception:
+            return None
+
+    def futures_balance_summary(self, balances: list[dict]) -> dict:
+        wallet_usdt = Decimal("0")
+        available_usdt = Decimal("0")
+        margin_usdt = Decimal("0")
+        unrealized_usdt = Decimal("0")
+        idr_rate = self.usdt_idr_rate()
+        for balance in balances:
+            asset = str(balance.get("asset", "")).upper()
+            price = self.asset_usdt_price(asset)
+            balance_wallet_usdt = Decimal(str(balance.get("walletBalance", "0"))) * price
+            balance_available_usdt = Decimal(str(balance.get("availableBalance", "0"))) * price
+            balance_margin_usdt = Decimal(str(balance.get("marginBalance", "0"))) * price
+            balance_unrealized_usdt = Decimal(str(balance.get("unrealizedProfit", "0"))) * price
+            balance["usdtPrice"] = str(price)
+            balance["walletUsdt"] = str(balance_wallet_usdt)
+            balance["availableUsdt"] = str(balance_available_usdt)
+            balance["marginUsdt"] = str(balance_margin_usdt)
+            balance["unrealizedUsdt"] = str(balance_unrealized_usdt)
+            if idr_rate:
+                balance["walletIdr"] = str(balance_wallet_usdt * idr_rate)
+                balance["availableIdr"] = str(balance_available_usdt * idr_rate)
+                balance["marginIdr"] = str(balance_margin_usdt * idr_rate)
+                balance["unrealizedIdr"] = str(balance_unrealized_usdt * idr_rate)
+            wallet_usdt += balance_wallet_usdt
+            available_usdt += balance_available_usdt
+            margin_usdt += balance_margin_usdt
+            unrealized_usdt += balance_unrealized_usdt
+        summary = {
+            "wallet_usdt": str(wallet_usdt),
+            "available_usdt": str(available_usdt),
+            "margin_usdt": str(margin_usdt),
+            "unrealized_usdt": str(unrealized_usdt),
+            "usdt_idr_rate": str(idr_rate) if idr_rate else None,
+        }
+        if idr_rate:
+            summary.update(
+                {
+                    "wallet_idr": str(wallet_usdt * idr_rate),
+                    "available_idr": str(available_usdt * idr_rate),
+                    "margin_idr": str(margin_usdt * idr_rate),
+                    "unrealized_idr": str(unrealized_usdt * idr_rate),
+                }
+            )
+        return summary
+
     def exchange_symbol_info(self) -> dict:
         path = "/fapi/v1/exchangeInfo" if self.is_futures() else "/api/v3/exchangeInfo"
         info = self.public_get(path)
@@ -256,11 +330,13 @@ class BinanceClient:
         if self.has_signed_credentials():
             account = self.signed_get("/fapi/v2/account" if self.is_futures() else "/api/v3/account")
             if self.is_futures():
-                result["balances"] = [
+                balances = [
                     asset
                     for asset in account.get("assets", [])
                     if float(asset.get("walletBalance", "0")) > 0 or float(asset.get("availableBalance", "0")) > 0
                 ]
+                result["balances"] = balances
+                result["balance_summary"] = self.futures_balance_summary(balances)
                 result["open_positions"] = [
                     pos for pos in account.get("positions", []) if abs(float(pos.get("positionAmt", "0"))) > 0
                 ]
@@ -299,7 +375,28 @@ class BinanceClient:
             return {"dry_run": True, "symbol": self.symbol, "leverage": safe_leverage}
         return self.signed_post("/fapi/v1/leverage", {"symbol": self.symbol, "leverage": str(safe_leverage)})
 
-    def place_futures_market_order(self, side: str, quantity: str | None = None, reduce_only: bool = False) -> dict:
+    def is_hedge_mode(self) -> bool:
+        if not self.is_futures() or self.dry_run():
+            return env_bool("BINANCE_HEDGE_MODE", "false")
+        payload = self.signed_get("/fapi/v1/positionSide/dual")
+        return bool(payload.get("dualSidePosition"))
+
+    def order_position_side(self, side: str, position_side: str | None = None) -> str | None:
+        if not self.is_hedge_mode():
+            return None
+        if position_side:
+            clean_position_side = position_side.strip().upper()
+            if clean_position_side in {"LONG", "SHORT"}:
+                return clean_position_side
+        return "LONG" if side.strip().upper() == "BUY" else "SHORT"
+
+    def place_futures_market_order(
+        self,
+        side: str,
+        quantity: str | None = None,
+        reduce_only: bool = False,
+        position_side: str | None = None,
+    ) -> dict:
         if not self.is_futures():
             raise ValueError("Auto order saat ini hanya dibuat untuk Binance Futures USDT-M.")
         clean_side = side.strip().upper()
@@ -307,7 +404,10 @@ class BinanceClient:
             raise ValueError("side harus BUY atau SELL.")
         qty = quantity or self.calculate_quantity()
         params = {"symbol": self.symbol, "side": clean_side, "type": "MARKET", "quantity": qty}
-        if reduce_only:
+        resolved_position_side = self.order_position_side(clean_side, position_side)
+        if resolved_position_side:
+            params["positionSide"] = resolved_position_side
+        if reduce_only and not resolved_position_side:
             params["reduceOnly"] = "true"
         if self.dry_run():
             return {"dry_run": True, "endpoint": "/fapi/v1/order", "params": params}
@@ -345,6 +445,10 @@ class BinanceClient:
             "closePosition": "true",
             "workingType": "MARK_PRICE",
         }
+        resolved_position_side = self.order_position_side(entry_side)
+        if resolved_position_side:
+            tp_params["positionSide"] = resolved_position_side
+            sl_params["positionSide"] = resolved_position_side
         if self.dry_run():
             return {"dry_run": True, "tp_order": tp_params, "sl_order": sl_params}
         tp_result = self.signed_post("/fapi/v1/order", tp_params)
@@ -354,9 +458,9 @@ class BinanceClient:
     def close_position_market(self, position_side: str) -> dict:
         clean = position_side.strip().upper()
         if clean == "LONG":
-            return self.place_futures_market_order("SELL", reduce_only=True)
+            return self.place_futures_market_order("SELL", reduce_only=True, position_side="LONG")
         if clean == "SHORT":
-            return self.place_futures_market_order("BUY", reduce_only=True)
+            return self.place_futures_market_order("BUY", reduce_only=True, position_side="SHORT")
         raise ValueError("position_side harus LONG atau SHORT.")
 
     def handle_webhook_signal(self, payload: dict) -> dict:
@@ -474,14 +578,22 @@ def generate_auto_signal(symbol: str) -> dict:
     last_close = closes[-1]
     buy_rsi = Decimal(os.getenv("BUY_RSI", "55"))
     sell_rsi = Decimal(os.getenv("SELL_RSI", "45"))
+    has_volume = volume_ok(volumes)
     signal = None
     reason = "NO SIGNAL"
-    if fast_prev <= slow_prev and fast_now > slow_now and rsi_now >= buy_rsi and volume_ok(volumes):
+    if fast_prev <= slow_prev and fast_now > slow_now and rsi_now >= buy_rsi and has_volume:
         signal = "BUY"
         reason = "EMA fast cross up + RSI kuat"
-    elif fast_prev >= slow_prev and fast_now < slow_now and rsi_now <= sell_rsi and volume_ok(volumes):
+    elif fast_prev >= slow_prev and fast_now < slow_now and rsi_now <= sell_rsi and has_volume:
         signal = "SELL"
         reason = "EMA fast cross down + RSI lemah"
+    elif env_bool("FAST_SIGNAL_MODE", "false") and has_volume:
+        if fast_now > slow_now and rsi_now >= buy_rsi:
+            signal = "BUY"
+            reason = "FAST MODE: trend EMA naik + RSI cukup kuat"
+        elif fast_now < slow_now and rsi_now <= sell_rsi:
+            signal = "SELL"
+            reason = "FAST MODE: trend EMA turun + RSI cukup lemah"
     return {
         "symbol": symbol,
         "interval": interval,
