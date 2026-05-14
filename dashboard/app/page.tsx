@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Balance = {
   asset: string;
@@ -26,10 +26,125 @@ type ApiResponse = {
   error?: string;
 };
 
+type Candle = {
+  open_time: number;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  close_time: number;
+};
+
+type KlinesResponse = {
+  ok: boolean;
+  market?: {
+    symbol: string;
+    interval: string;
+    candles: Candle[];
+  };
+  error?: string;
+};
+
+const intervals = ["1m", "5m", "15m", "1h"] as const;
+
+function formatPrice(value?: string) {
+  if (!value) return "-";
+  return Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function formatNumber(value?: string) {
+  if (!value) return "-";
+  return Number(value).toLocaleString("en-US", {
+    maximumFractionDigits: 6,
+  });
+}
+
+function formatClock(value?: number) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("id-ID", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+
+function CandleChart({ candles }: { candles: Candle[] }) {
+  const width = 980;
+  const height = 360;
+  const padding = { top: 18, right: 82, bottom: 28, left: 14 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const values = candles.flatMap((candle) => [Number(candle.high), Number(candle.low)]);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const xStep = plotWidth / Math.max(candles.length, 1);
+  const bodyWidth = Math.max(3, Math.min(10, xStep * 0.62));
+
+  const y = (price: number) => padding.top + ((max - price) / range) * plotHeight;
+  const lastClose = Number(candles.at(-1)?.close || 0);
+  const priceLines = [max, max - range * 0.25, max - range * 0.5, max - range * 0.75, min];
+
+  if (!candles.length) {
+    return <div className="chart-empty">Candle belum tersedia.</div>;
+  }
+
+  return (
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Candlestick chart">
+      <rect x="0" y="0" width={width} height={height} rx="8" />
+      {priceLines.map((line) => (
+        <g key={line}>
+          <line x1={padding.left} x2={width - padding.right + 18} y1={y(line)} y2={y(line)} className="gridline" />
+          <text x={width - padding.right + 28} y={y(line) + 4} className="axis-label">
+            {formatPrice(String(line))}
+          </text>
+        </g>
+      ))}
+      {candles.map((candle, index) => {
+        const open = Number(candle.open);
+        const close = Number(candle.close);
+        const high = Number(candle.high);
+        const low = Number(candle.low);
+        const x = padding.left + index * xStep + xStep / 2;
+        const bodyTop = Math.min(y(open), y(close));
+        const bodyHeight = Math.max(1, Math.abs(y(open) - y(close)));
+        const isUp = close >= open;
+        const isLast = index === candles.length - 1;
+
+        return (
+          <g key={`${candle.open_time}-${index}`} className={isUp ? "candle up" : "candle down"}>
+            <line x1={x} x2={x} y1={y(high)} y2={y(low)} />
+            <rect
+              x={x - bodyWidth / 2}
+              y={bodyTop}
+              width={bodyWidth}
+              height={bodyHeight}
+              rx="1.5"
+              className={isLast ? "running" : ""}
+            />
+          </g>
+        );
+      })}
+      <line x1={padding.left} x2={width - padding.right + 18} y1={y(lastClose)} y2={y(lastClose)} className="last-price" />
+      <text x={width - padding.right + 28} y={y(lastClose) + 4} className="last-label">
+        {formatPrice(String(lastClose))}
+      </text>
+    </svg>
+  );
+}
+
 export default function Home() {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
+  const [candles, setCandles] = useState<Candle[]>([]);
+  const [interval, setIntervalValue] = useState<(typeof intervals)[number]>("1m");
   const [error, setError] = useState("");
+  const [chartError, setChartError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [chartLoading, setChartLoading] = useState(false);
   const [checked, setChecked] = useState(false);
 
   const serverTime = useMemo(() => {
@@ -41,7 +156,7 @@ export default function Home() {
     }).format(new Date(value));
   }, [status]);
 
-  async function checkBinance() {
+  const checkBinance = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -57,15 +172,42 @@ export default function Home() {
       setChecked(true);
       setLoading(false);
     }
-  }
+  }, []);
+
+  const loadCandles = useCallback(async (nextInterval = interval) => {
+    setChartLoading(true);
+    setChartError("");
+    try {
+      const response = await fetch(`/api/binance/klines?interval=${nextInterval}&limit=120`);
+      const body = (await response.json()) as KlinesResponse;
+      if (!response.ok || !body.ok || !body.market) {
+        throw new Error(body.error || "Backend belum bisa membaca candle Binance.");
+      }
+      setCandles(body.market.candles);
+    } catch (caught) {
+      setChartError(caught instanceof Error ? caught.message : "Terjadi error saat membaca candle.");
+    } finally {
+      setChartLoading(false);
+    }
+  }, [interval]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
+      loadCandles();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [checkBinance, loadCandles]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      checkBinance();
+      loadCandles(interval);
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [checkBinance, interval, loadCandles]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -84,6 +226,10 @@ export default function Home() {
     }
     return messages;
   }, [status]);
+
+  const lastCandle = candles.at(-1);
+  const candleDirection =
+    lastCandle && Number(lastCandle.close) >= Number(lastCandle.open) ? "up" : "down";
 
   return (
     <main className="page">
@@ -126,7 +272,7 @@ export default function Home() {
         </article>
         <article className="metric">
           <span>Harga</span>
-          <strong>{status?.price?.price || "-"}</strong>
+          <strong className="price-value">{formatPrice(status?.price?.price)}</strong>
         </article>
         <article className="metric">
           <span>API Key</span>
@@ -136,6 +282,67 @@ export default function Home() {
           <span>Key Type</span>
           <strong>{status?.key_type?.toUpperCase() || "-"}</strong>
         </article>
+      </section>
+
+      <section className="chart-panel">
+        <header className="panel-head">
+          <div>
+            <h2>Live Candle Chart</h2>
+            <p>{status?.symbol || "BTCUSDT"} berjalan, refresh otomatis tiap 5 detik.</p>
+          </div>
+          <div className="toolbar">
+            {intervals.map((item) => (
+              <button
+                className={item === interval ? "chip active" : "chip"}
+                key={item}
+                type="button"
+                onClick={() => {
+                  setIntervalValue(item);
+                  loadCandles(item);
+                }}
+              >
+                {item}
+              </button>
+            ))}
+            <button className="chip" disabled={chartLoading} type="button" onClick={() => loadCandles()}>
+              {chartLoading ? "Loading" : "Refresh"}
+            </button>
+          </div>
+        </header>
+
+        {chartError ? <div className="alert compact">{chartError}</div> : null}
+        <CandleChart candles={candles} />
+
+        <div className="candle-stats">
+          <div>
+            <span>Running Candle</span>
+            <strong className={candleDirection}>{lastCandle ? candleDirection.toUpperCase() : "-"}</strong>
+          </div>
+          <div>
+            <span>Open</span>
+            <strong>{formatPrice(lastCandle?.open)}</strong>
+          </div>
+          <div>
+            <span>High</span>
+            <strong>{formatPrice(lastCandle?.high)}</strong>
+          </div>
+          <div>
+            <span>Low</span>
+            <strong>{formatPrice(lastCandle?.low)}</strong>
+          </div>
+          <div>
+            <span>Close</span>
+            <strong>{formatPrice(lastCandle?.close)}</strong>
+          </div>
+          <div>
+            <span>Volume</span>
+            <strong>{formatNumber(lastCandle?.volume)}</strong>
+          </div>
+          <div>
+            <span>Update</span>
+            <strong>{formatClock(lastCandle?.close_time)}</strong>
+          </div>
+        </div>
       </section>
 
       <section className="split">
@@ -174,7 +381,7 @@ export default function Home() {
               ))}
             </div>
           ) : (
-            <p className="empty">Belum ada saldo terbaca. Isi kredensial Binance lalu cek ulang.</p>
+            <p className="empty">Tidak ada saldo spot non-zero yang terbaca.</p>
           )}
         </article>
       </section>

@@ -136,6 +136,50 @@ class BinanceClient:
             ]
         return result
 
+    def klines(self, interval: str = "1m", limit: int = 120) -> dict:
+        allowed_intervals = {
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "4h",
+            "6h",
+            "8h",
+            "12h",
+            "1d",
+        }
+        if interval not in allowed_intervals:
+            raise ValueError("Interval candle tidak didukung.")
+        safe_limit = max(10, min(limit, 500))
+        rows = self.public_get(
+            "/api/v3/klines",
+            {
+                "symbol": self.symbol,
+                "interval": interval,
+                "limit": str(safe_limit),
+            },
+        )
+        candles = [
+            {
+                "open_time": item[0],
+                "open": item[1],
+                "high": item[2],
+                "low": item[3],
+                "close": item[4],
+                "volume": item[5],
+                "close_time": item[6],
+            }
+            for item in rows
+        ]
+        return {
+            "symbol": self.symbol,
+            "interval": interval,
+            "candles": candles,
+        }
+
     def has_signed_credentials(self) -> bool:
         if self.key_type == "rsa":
             return bool(self.api_key and self.private_key_path.exists())
@@ -290,10 +334,25 @@ class BotHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if self.path == "/api/binance/status":
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/binance/status":
             client = BinanceClient()
             try:
                 self.send_json({"ok": True, "binance": client.status()})
+            except Exception as error:  # noqa: BLE001 - surface setup/API problems to the local UI.
+                self.send_json({"ok": False, "error": str(error)}, status=502)
+            return
+
+        if parsed.path == "/api/binance/klines":
+            query = urllib.parse.parse_qs(parsed.query)
+            interval = query.get("interval", ["1m"])[0]
+            try:
+                limit = int(query.get("limit", ["120"])[0])
+            except ValueError:
+                limit = 120
+            client = BinanceClient()
+            try:
+                self.send_json({"ok": True, "market": client.klines(interval=interval, limit=limit)})
             except Exception as error:  # noqa: BLE001 - surface setup/API problems to the local UI.
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return
