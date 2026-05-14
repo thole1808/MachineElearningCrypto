@@ -120,6 +120,17 @@ h2 {
   font-weight: 700;
 }
 
+.live-status {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.live-status strong {
+  color: #0b5f59;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -192,8 +203,8 @@ dt {
 
 .positions-row {
   display: grid;
-  grid-template-columns: 112px 76px 100px 112px 112px 128px 112px;
-  min-width: 752px;
+  grid-template-columns: 112px 76px 100px 112px 112px 128px 78px 112px;
+  min-width: 840px;
   align-items: center;
   gap: 10px;
   padding: 12px;

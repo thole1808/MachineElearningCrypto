@@ -337,9 +337,7 @@ class BinanceClient:
                 ]
                 result["balances"] = balances
                 result["balance_summary"] = self.futures_balance_summary(balances)
-                result["open_positions"] = [
-                    pos for pos in account.get("positions", []) if abs(float(pos.get("positionAmt", "0"))) > 0
-                ]
+                result["open_positions"] = self.open_positions()
             else:
                 result["balances"] = [
                     bal
@@ -351,8 +349,21 @@ class BinanceClient:
     def open_positions(self) -> list[dict]:
         if self.dry_run():
             return []
-        account = self.signed_get("/fapi/v2/account")
-        return [pos for pos in account.get("positions", []) if abs(float(pos.get("positionAmt", "0"))) > 0]
+        rows = self.signed_get("/fapi/v2/positionRisk")
+        positions = [pos for pos in rows if abs(float(pos.get("positionAmt", "0"))) > 0]
+        for position in positions:
+            entry = Decimal(str(position.get("entryPrice", "0")))
+            mark = Decimal(str(position.get("markPrice", "0")))
+            amount = Decimal(str(position.get("positionAmt", "0")))
+            if entry > 0 and mark > 0:
+                if amount > 0:
+                    pnl_percent = ((mark - entry) / entry) * Decimal("100")
+                    position["tpHitDirection"] = "mark >= TP" if mark >= entry else "mark < TP"
+                else:
+                    pnl_percent = ((entry - mark) / entry) * Decimal("100")
+                    position["tpHitDirection"] = "mark <= TP" if mark <= entry else "mark > TP"
+                position["pnlPercent"] = str(pnl_percent)
+        return positions
 
     def has_open_position(self) -> bool:
         for position in self.open_positions():

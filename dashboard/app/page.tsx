@@ -38,10 +38,13 @@ type OpenPosition = {
   positionAmt: string;
   entryPrice: string;
   markPrice?: string;
-  unRealizedProfit: string;
+  unRealizedProfit?: string;
+  unrealizedProfit?: string;
   liquidationPrice?: string;
   leverage: string;
   marginType?: string;
+  pnlPercent?: string;
+  positionSide?: string;
 };
 
 type BinanceStatus = {
@@ -100,6 +103,7 @@ type AutoSignalResponse = {
 
 const quoteFilters = ["USDT", "USDC", "BTC", "ETH", "BNB"] as const;
 const defaultSymbol = "SOLUSDT";
+const realtimeRefreshMs = 2000;
 type BalanceCurrency = "USDT" | "IDR";
 
 function formatPrice(value?: string) {
@@ -123,6 +127,15 @@ function formatSignedUsd(value?: string) {
   return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", {
     maximumFractionDigits: 0,
   })} USDT`;
+}
+
+function formatPercent(value?: string) {
+  if (!value) return "-";
+  const number = Number(value);
+  return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}%`;
 }
 
 function formatUsd(value?: string) {
@@ -152,6 +165,7 @@ export default function Home() {
   const [signalError, setSignalError] = useState("");
   const [loading, setLoading] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
 
@@ -164,9 +178,18 @@ export default function Home() {
     }).format(new Date(value));
   }, [status]);
 
-  const checkBinance = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const lastUpdated = useMemo(() => {
+    if (!lastUpdatedAt) return "-";
+    return new Intl.DateTimeFormat("id-ID", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(new Date(lastUpdatedAt));
+  }, [lastUpdatedAt]);
+
+  const checkBinance = useCallback(async (manual = false) => {
+    if (manual) setLoading(true);
+    if (manual) setError("");
     try {
       const response = await fetch(`/api/binance/status?symbol=${selectedSymbol}`);
       const body = (await response.json()) as ApiResponse;
@@ -174,11 +197,13 @@ export default function Home() {
         throw new Error(body.error || "Backend belum bisa membaca status Binance.");
       }
       setStatus(body.binance);
+      setError("");
+      setLastUpdatedAt(Date.now());
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Terjadi error tidak dikenal.");
     } finally {
       setChecked(true);
-      setLoading(false);
+      if (manual) setLoading(false);
     }
   }, [selectedSymbol]);
 
@@ -197,7 +222,6 @@ export default function Home() {
   }, []);
 
   const loadAutoSignal = useCallback(async () => {
-    setSignalError("");
     try {
       const response = await fetch(`/api/auto-signal?symbol=${selectedSymbol}`);
       const body = (await response.json()) as AutoSignalResponse;
@@ -205,6 +229,7 @@ export default function Home() {
         throw new Error(body.error || "Backend belum bisa membaca signal Binance.");
       }
       setAutoSignal(body.signal);
+      setSignalError("");
     } catch (caught) {
       setSignalError(caught instanceof Error ? caught.message : "Terjadi error saat membaca signal.");
     }
@@ -212,19 +237,17 @@ export default function Home() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      checkBinance();
       loadSymbols();
-      loadAutoSignal();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadSymbols, loadAutoSignal]);
+  }, [loadSymbols]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
       loadAutoSignal();
-    }, 5000);
+    }, realtimeRefreshMs);
 
     return () => window.clearInterval(timer);
   }, [checkBinance, loadAutoSignal]);
@@ -236,7 +259,7 @@ export default function Home() {
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, selectedSymbol, loadAutoSignal]);
+  }, [checkBinance, loadAutoSignal]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -259,7 +282,10 @@ export default function Home() {
   const openPositions = status?.open_positions || [];
   const futuresBalances = status?.balances || [];
   const balanceSummary = status?.balance_summary;
-  const totalUnrealizedPnl = openPositions.reduce((total, position) => total + Number(position.unRealizedProfit || 0), 0);
+  const totalUnrealizedPnl = openPositions.reduce(
+    (total, position) => total + Number(position.unRealizedProfit ?? position.unrealizedProfit ?? 0),
+    0,
+  );
   const showIdr = balanceCurrency === "IDR";
   const formatBalance = useCallback((usdtValue?: string, idrValue?: string) => {
     if (showIdr) return formatIdr(idrValue);
@@ -290,7 +316,7 @@ export default function Home() {
             Pantau koneksi bot lokal, posisi Futures aktif, saldo, dan sinyal scalping otomatis.
           </p>
         </div>
-        <button className="primary" disabled={loading} onClick={checkBinance}>
+        <button className="primary" disabled={loading} onClick={() => checkBinance(true)}>
           {loading ? "Mengecek..." : "Cek Binance"}
         </button>
       </section>
@@ -307,7 +333,10 @@ export default function Home() {
         </section>
       ) : null}
       {!error && checked && status?.has_keys ? (
-        <section className="success">Koneksi Binance terbaca. Bot masih mode monitor, belum mengeksekusi order.</section>
+        <section className="success live-status">
+          <span>Koneksi Binance terbaca. Realtime refresh tiap {realtimeRefreshMs / 1000} detik.</span>
+          <strong>Update {lastUpdated}</strong>
+        </section>
       ) : null}
 
       <section className="market-panel">
@@ -412,19 +441,22 @@ export default function Home() {
               <span>Entry</span>
               <span>Mark</span>
               <span>PnL</span>
+              <span>ROE</span>
               <span>Liq.</span>
             </div>
             {openPositions.map((position) => {
               const amount = Number(position.positionAmt);
-              const pnl = Number(position.unRealizedProfit || 0);
+              const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
+              const pnl = Number(pnlValue);
               return (
                 <div className="positions-row" key={position.symbol}>
                   <strong>{position.symbol}</strong>
-                  <span className={amount >= 0 ? "up" : "down"}>{amount >= 0 ? "LONG" : "SHORT"}</span>
+                  <span className={amount >= 0 ? "up" : "down"}>{position.positionSide && position.positionSide !== "BOTH" ? position.positionSide : amount >= 0 ? "LONG" : "SHORT"}</span>
                   <span>{formatNumber(position.positionAmt)}</span>
                   <span>{formatPrice(position.entryPrice)}</span>
                   <span>{formatPrice(position.markPrice)}</span>
-                  <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(position.unRealizedProfit)}</span>
+                  <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(pnlValue)}</span>
+                  <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.pnlPercent)}</span>
                   <span>{formatPrice(position.liquidationPrice)}</span>
                 </div>
               );
