@@ -21,9 +21,9 @@ MEMORY_FILE = DATA_DIR / "conversations.jsonl"
 
 
 class BinanceClient:
-    def __init__(self) -> None:
+    def __init__(self, symbol: str | None = None) -> None:
         self.mode = os.getenv("BINANCE_MODE", "testnet").strip().lower()
-        self.symbol = os.getenv("TRADE_SYMBOL", "BTCUSDT").strip().upper()
+        self.symbol = (symbol or os.getenv("TRADE_SYMBOL", "BTCUSDT")).strip().upper()
         self.api_key = os.getenv("BINANCE_API_KEY", "").strip()
         self.api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
         self.key_type = os.getenv("BINANCE_KEY_TYPE", "hmac").strip().lower()
@@ -52,6 +52,26 @@ class BinanceClient:
             url = f"{url}?{query}"
         request = urllib.request.Request(url, method="GET")
         return self.fetch_json(request)
+
+    def market_symbols(self) -> dict:
+        info = self.public_get("/api/v3/exchangeInfo")
+        preferred_quotes = {"USDT", "USDC", "FDUSD", "BTC", "ETH", "BNB"}
+        symbols = [
+            {
+                "symbol": item.get("symbol", ""),
+                "base_asset": item.get("baseAsset", ""),
+                "quote_asset": item.get("quoteAsset", ""),
+                "status": item.get("status", ""),
+            }
+            for item in info.get("symbols", [])
+            if item.get("status") == "TRADING" and item.get("quoteAsset") in preferred_quotes
+        ]
+        symbols.sort(key=lambda item: (item["quote_asset"] != "USDT", item["symbol"]))
+        return {
+            "mode": self.mode,
+            "count": len(symbols),
+            "symbols": symbols,
+        }
 
     def signed_get(self, path: str, params: dict[str, str] | None = None) -> dict:
         if not self.api_key:
@@ -336,7 +356,9 @@ class BotHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/binance/status":
-            client = BinanceClient()
+            query = urllib.parse.parse_qs(parsed.query)
+            symbol = query.get("symbol", [None])[0]
+            client = BinanceClient(symbol=symbol)
             try:
                 self.send_json({"ok": True, "binance": client.status()})
             except Exception as error:  # noqa: BLE001 - surface setup/API problems to the local UI.
@@ -345,14 +367,23 @@ class BotHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/binance/klines":
             query = urllib.parse.parse_qs(parsed.query)
+            symbol = query.get("symbol", [None])[0]
             interval = query.get("interval", ["1m"])[0]
             try:
                 limit = int(query.get("limit", ["120"])[0])
             except ValueError:
                 limit = 120
-            client = BinanceClient()
+            client = BinanceClient(symbol=symbol)
             try:
                 self.send_json({"ok": True, "market": client.klines(interval=interval, limit=limit)})
+            except Exception as error:  # noqa: BLE001 - surface setup/API problems to the local UI.
+                self.send_json({"ok": False, "error": str(error)}, status=502)
+            return
+
+        if parsed.path == "/api/binance/symbols":
+            client = BinanceClient()
+            try:
+                self.send_json({"ok": True, "market": client.market_symbols()})
             except Exception as error:  # noqa: BLE001 - surface setup/API problems to the local UI.
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return

@@ -46,7 +46,25 @@ type KlinesResponse = {
   error?: string;
 };
 
+type MarketSymbol = {
+  symbol: string;
+  base_asset: string;
+  quote_asset: string;
+  status: string;
+};
+
+type SymbolsResponse = {
+  ok: boolean;
+  market?: {
+    mode: string;
+    count: number;
+    symbols: MarketSymbol[];
+  };
+  error?: string;
+};
+
 const intervals = ["1m", "5m", "15m", "1h"] as const;
+const quoteFilters = ["USDT", "USDC", "BTC", "ETH", "BNB"] as const;
 
 function formatPrice(value?: string) {
   if (!value) return "-";
@@ -140,9 +158,14 @@ function CandleChart({ candles }: { candles: Candle[] }) {
 export default function Home() {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
+  const [symbols, setSymbols] = useState<MarketSymbol[]>([]);
+  const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
+  const [search, setSearch] = useState("");
+  const [quoteFilter, setQuoteFilter] = useState<(typeof quoteFilters)[number]>("USDT");
   const [interval, setIntervalValue] = useState<(typeof intervals)[number]>("1m");
   const [error, setError] = useState("");
   const [chartError, setChartError] = useState("");
+  const [symbolsError, setSymbolsError] = useState("");
   const [loading, setLoading] = useState(false);
   const [chartLoading, setChartLoading] = useState(false);
   const [checked, setChecked] = useState(false);
@@ -160,7 +183,7 @@ export default function Home() {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/binance/status");
+      const response = await fetch(`/api/binance/status?symbol=${selectedSymbol}`);
       const body = (await response.json()) as ApiResponse;
       if (!response.ok || !body.ok || !body.binance) {
         throw new Error(body.error || "Backend belum bisa membaca status Binance.");
@@ -172,13 +195,18 @@ export default function Home() {
       setChecked(true);
       setLoading(false);
     }
-  }, []);
+  }, [selectedSymbol]);
 
   const loadCandles = useCallback(async (nextInterval = interval) => {
     setChartLoading(true);
     setChartError("");
     try {
-      const response = await fetch(`/api/binance/klines?interval=${nextInterval}&limit=120`);
+      const query = new URLSearchParams({
+        symbol: selectedSymbol,
+        interval: nextInterval,
+        limit: "120",
+      });
+      const response = await fetch(`/api/binance/klines?${query.toString()}`);
       const body = (await response.json()) as KlinesResponse;
       if (!response.ok || !body.ok || !body.market) {
         throw new Error(body.error || "Backend belum bisa membaca candle Binance.");
@@ -189,16 +217,31 @@ export default function Home() {
     } finally {
       setChartLoading(false);
     }
-  }, [interval]);
+  }, [interval, selectedSymbol]);
+
+  const loadSymbols = useCallback(async () => {
+    setSymbolsError("");
+    try {
+      const response = await fetch("/api/binance/symbols");
+      const body = (await response.json()) as SymbolsResponse;
+      if (!response.ok || !body.ok || !body.market) {
+        throw new Error(body.error || "Backend belum bisa membaca daftar pair Binance.");
+      }
+      setSymbols(body.market.symbols);
+    } catch (caught) {
+      setSymbolsError(caught instanceof Error ? caught.message : "Terjadi error saat membaca daftar pair.");
+    }
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
       loadCandles();
+      loadSymbols();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadCandles]);
+  }, [checkBinance, loadCandles, loadSymbols]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -208,6 +251,16 @@ export default function Home() {
 
     return () => window.clearInterval(timer);
   }, [checkBinance, interval, loadCandles]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setCandles([]);
+      checkBinance();
+      loadCandles(interval);
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [checkBinance, interval, loadCandles, selectedSymbol]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -230,6 +283,16 @@ export default function Home() {
   const lastCandle = candles.at(-1);
   const candleDirection =
     lastCandle && Number(lastCandle.close) >= Number(lastCandle.open) ? "up" : "down";
+  const visibleSymbols = useMemo(() => {
+    const needle = search.trim().toUpperCase();
+    return symbols
+      .filter((item) => item.quote_asset === quoteFilter)
+      .filter((item) => {
+        if (!needle) return true;
+        return item.symbol.includes(needle) || item.base_asset.includes(needle);
+      })
+      .slice(0, 80);
+  }, [quoteFilter, search, symbols]);
 
   return (
     <main className="page">
@@ -238,7 +301,7 @@ export default function Home() {
           <p className="eyebrow">Local Binance Testnet Monitor</p>
           <h1>Machine Elearning Crypto</h1>
           <p className="subcopy">
-            Pantau koneksi bot lokal, harga simbol, API key, private key RSA, dan saldo Binance.
+            Pantau koneksi bot lokal, pilih pair Binance, baca candle berjalan, dan siapkan tools trading sendiri.
           </p>
         </div>
         <button className="primary" disabled={loading} onClick={checkBinance}>
@@ -261,6 +324,49 @@ export default function Home() {
         <section className="success">Koneksi Binance terbaca. Bot masih mode monitor, belum mengeksekusi order.</section>
       ) : null}
 
+      <section className="market-panel">
+        <header className="panel-head">
+          <div>
+            <h2>Market Scanner</h2>
+            <p>Pilih pair Spot Binance. Chart dan harga otomatis mengikuti symbol pilihan.</p>
+          </div>
+          <input
+            className="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Cari BTC, ETH, SOL..."
+          />
+        </header>
+        {symbolsError ? <div className="alert compact">{symbolsError}</div> : null}
+        <div className="toolbar left">
+          {quoteFilters.map((quote) => (
+            <button
+              className={quote === quoteFilter ? "chip active" : "chip"}
+              key={quote}
+              type="button"
+              onClick={() => setQuoteFilter(quote)}
+            >
+              {quote}
+            </button>
+          ))}
+        </div>
+        <div className="symbol-list">
+          {visibleSymbols.map((item) => (
+            <button
+              className={item.symbol === selectedSymbol ? "symbol-button active" : "symbol-button"}
+              key={item.symbol}
+              type="button"
+              onClick={() => setSelectedSymbol(item.symbol)}
+            >
+              <strong>{item.symbol}</strong>
+              <span>
+                {item.base_asset}/{item.quote_asset}
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
       <section className="grid">
         <article className="metric">
           <span>Mode</span>
@@ -268,7 +374,7 @@ export default function Home() {
         </article>
         <article className="metric">
           <span>Symbol</span>
-          <strong>{status?.symbol || "-"}</strong>
+          <strong>{status?.symbol || selectedSymbol}</strong>
         </article>
         <article className="metric">
           <span>Harga</span>
@@ -288,7 +394,7 @@ export default function Home() {
         <header className="panel-head">
           <div>
             <h2>Live Candle Chart</h2>
-            <p>{status?.symbol || "BTCUSDT"} berjalan, refresh otomatis tiap 5 detik.</p>
+            <p>{status?.symbol || selectedSymbol} berjalan, refresh otomatis tiap 5 detik.</p>
           </div>
           <div className="toolbar">
             {intervals.map((item) => (

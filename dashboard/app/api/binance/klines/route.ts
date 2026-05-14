@@ -4,11 +4,13 @@ const botApiUrl = process.env.BOT_API_URL?.replace(/\/$/, "") || "http://127.0.0
 
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
+  const symbol = params.get("symbol") || "";
   const interval = params.get("interval") || "1m";
   const limit = params.get("limit") || "120";
 
   try {
     const query = new URLSearchParams({ interval, limit });
+    if (symbol) query.set("symbol", symbol);
     const response = await fetch(`${botApiUrl}/api/binance/klines?${query.toString()}`, {
       cache: "no-store",
     });

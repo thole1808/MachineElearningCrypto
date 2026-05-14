@@ -1,14 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
 const botApiUrl = process.env.BOT_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8765";
 
-export async function GET(request: NextRequest) {
-  const symbol = request.nextUrl.searchParams.get("symbol") || "";
-  const query = new URLSearchParams();
-  if (symbol) query.set("symbol", symbol);
-
+export async function GET() {
   try {
-    const response = await fetch(`${botApiUrl}/api/binance/status?${query.toString()}`, {
+    const response = await fetch(`${botApiUrl}/api/binance/symbols`, {
       cache: "no-store",
     });
     const body = await response.json();
@@ -25,7 +21,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       {
         ok: false,
-        error: `Backend belum aktif di ${botApiUrl}. Jalankan ./start-web.sh dari root project. Detail: ${message}`,
+        error: `Gagal membaca daftar pair dari backend ${botApiUrl}. Detail: ${message}`,
       },
       { status: 502 },
     );

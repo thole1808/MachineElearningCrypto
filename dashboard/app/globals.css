@@ -159,7 +159,8 @@ dt {
   white-space: nowrap;
 }
 
-.chart-panel {
+.chart-panel,
+.market-panel {
   margin-top: 14px;
   padding: 20px;
   border: 1px solid var(--line);
@@ -192,6 +193,28 @@ dt {
   flex-wrap: wrap;
 }
 
+.toolbar.left {
+  justify-content: flex-start;
+  margin-bottom: 12px;
+}
+
+.search {
+  width: min(320px, 100%);
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: white;
+  font: inherit;
+  font-weight: 700;
+}
+
+.search:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.18);
+  border-color: var(--accent);
+}
+
 .chip {
   min-width: 48px;
   min-height: 36px;
@@ -217,6 +240,47 @@ dt {
 
 .compact {
   margin-bottom: 12px;
+}
+
+.symbol-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+  gap: 8px;
+  max-height: 246px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.symbol-button {
+  min-height: 62px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfc;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.symbol-button strong,
+.symbol-button span {
+  display: block;
+}
+
+.symbol-button strong {
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.symbol-button span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.symbol-button.active {
+  border-color: var(--accent);
+  background: #e8f7f0;
 }
 
 .chart {
@@ -390,6 +454,10 @@ dd {
   .toolbar {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .search {
+    width: 100%;
   }
 
   .row {
