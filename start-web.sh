@@ -9,19 +9,38 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-3010}"
 
 export BOT_API_URL="http://${BACKEND_HOST}:${BACKEND_PORT}"
 
+stop_port() {
+  local port="$1"
+  local label="$2"
+  local pids
+
+  pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  if [ -z "$pids" ]; then
+    return
+  fi
+
+  echo "Stopping existing ${label} on port ${port}: ${pids}"
+  kill $pids >/dev/null 2>&1 || true
+  sleep 1
+
+  pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    echo "Force stopping ${label} on port ${port}: ${pids}"
+    kill -9 $pids >/dev/null 2>&1 || true
+  fi
+}
+
 if [ ! -d "$DASHBOARD_DIR/node_modules" ]; then
   echo "Installing dashboard dependencies..."
   (cd "$DASHBOARD_DIR" && npm install)
 fi
 
+stop_port "$DASHBOARD_PORT" "dashboard"
+stop_port "$BACKEND_PORT" "Python backend"
+
 echo "Starting Python backend: ${BOT_API_URL}"
-BACKEND_PID=""
-if lsof -ti tcp:"$BACKEND_PORT" >/dev/null 2>&1; then
-  echo "Backend port ${BACKEND_PORT} is already in use; reusing the running backend."
-else
-  (cd "$ROOT_DIR" && python3 app.py) &
-  BACKEND_PID=$!
-fi
+(cd "$ROOT_DIR" && python3 app.py) &
+BACKEND_PID=$!
 
 cleanup() {
   echo
