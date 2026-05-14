@@ -63,6 +63,23 @@ type SymbolsResponse = {
   error?: string;
 };
 
+type AutoSignal = {
+  symbol: string;
+  interval: string;
+  signal: string | null;
+  reason: string;
+  close: string;
+  ema_fast: string;
+  ema_slow: string;
+  rsi: string;
+};
+
+type AutoSignalResponse = {
+  ok: boolean;
+  signal?: AutoSignal;
+  error?: string;
+};
+
 const intervals = ["1m", "5m", "15m", "1h"] as const;
 const quoteFilters = ["USDT", "USDC", "BTC", "ETH", "BNB"] as const;
 
@@ -166,9 +183,11 @@ export default function Home() {
   const [error, setError] = useState("");
   const [chartError, setChartError] = useState("");
   const [symbolsError, setSymbolsError] = useState("");
+  const [signalError, setSignalError] = useState("");
   const [loading, setLoading] = useState(false);
   const [chartLoading, setChartLoading] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -233,34 +252,51 @@ export default function Home() {
     }
   }, []);
 
+  const loadAutoSignal = useCallback(async () => {
+    setSignalError("");
+    try {
+      const response = await fetch(`/api/auto-signal?symbol=${selectedSymbol}`);
+      const body = (await response.json()) as AutoSignalResponse;
+      if (!response.ok || !body.ok || !body.signal) {
+        throw new Error(body.error || "Backend belum bisa membaca signal Binance.");
+      }
+      setAutoSignal(body.signal);
+    } catch (caught) {
+      setSignalError(caught instanceof Error ? caught.message : "Terjadi error saat membaca signal.");
+    }
+  }, [selectedSymbol]);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
       loadCandles();
       loadSymbols();
+      loadAutoSignal();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadCandles, loadSymbols]);
+  }, [checkBinance, loadCandles, loadSymbols, loadAutoSignal]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
       loadCandles(interval);
+      loadAutoSignal();
     }, 5000);
 
     return () => window.clearInterval(timer);
-  }, [checkBinance, interval, loadCandles]);
+  }, [checkBinance, interval, loadCandles, loadAutoSignal]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setCandles([]);
       checkBinance();
       loadCandles(interval);
+      loadAutoSignal();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, interval, loadCandles, selectedSymbol]);
+  }, [checkBinance, interval, loadCandles, selectedSymbol, loadAutoSignal]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -447,6 +483,44 @@ export default function Home() {
           <div>
             <span>Update</span>
             <strong>{formatClock(lastCandle?.close_time)}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel" style={{ marginTop: "24px", marginBottom: "24px" }}>
+        <header className="panel-head">
+          <div>
+            <h2>Auto Signal Scanner (Real-time)</h2>
+            <p>Sinyal scalping berjalan dari Python backend. Otomatis refresh tiap 5 detik.</p>
+          </div>
+        </header>
+        {signalError ? <div className="alert compact">{signalError}</div> : null}
+        <div className="candle-stats" style={{ marginTop: "16px" }}>
+          <div>
+            <span>Sinyal</span>
+            <strong className={autoSignal?.signal === "BUY" ? "up" : autoSignal?.signal === "SELL" ? "down" : ""}>
+              {autoSignal?.signal || "NO SIGNAL"}
+            </strong>
+          </div>
+          <div>
+            <span>Alasan</span>
+            <strong>{autoSignal?.reason || "-"}</strong>
+          </div>
+          <div>
+            <span>RSI</span>
+            <strong>{autoSignal?.rsi || "-"}</strong>
+          </div>
+          <div>
+            <span>EMA Fast</span>
+            <strong>{formatPrice(autoSignal?.ema_fast)}</strong>
+          </div>
+          <div>
+            <span>EMA Slow</span>
+            <strong>{formatPrice(autoSignal?.ema_slow)}</strong>
+          </div>
+          <div>
+            <span>Close</span>
+            <strong>{formatPrice(autoSignal?.close)}</strong>
           </div>
         </div>
       </section>
