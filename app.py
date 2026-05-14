@@ -502,6 +502,36 @@ class BinanceClient:
             return self.place_futures_market_order("BUY", reduce_only=True, position_side="SHORT")
         raise ValueError("position_side harus LONG atau SHORT.")
 
+    def close_position_amount(self, amount: Decimal) -> dict:
+        """Close posisi sesuai jumlah positionAmt dari Binance positionRisk.
+
+        amount > 0 berarti LONG, maka close dengan SELL.
+        amount < 0 berarti SHORT, maka close dengan BUY.
+        Ini lebih aman untuk force close profit karena memakai quantity posisi aktual,
+        bukan menghitung quantity baru dari ORDER_USDT.
+        """
+        if amount == 0:
+            return {"skipped": True, "reason": "Tidak ada position amount untuk ditutup."}
+
+        quantity = self.round_quantity(abs(amount))
+        if Decimal(quantity) <= 0:
+            raise ValueError(f"Quantity close menjadi 0 untuk {self.symbol}.")
+
+        if amount > 0:
+            return self.place_futures_market_order(
+                "SELL",
+                quantity=quantity,
+                reduce_only=True,
+                position_side="LONG",
+            )
+
+        return self.place_futures_market_order(
+            "BUY",
+            quantity=quantity,
+            reduce_only=True,
+            position_side="SHORT",
+        )
+
     def handle_webhook_signal(self, payload: dict) -> dict:
         token = os.getenv("WEBHOOK_TOKEN", "").strip()
         if token and str(payload.get("token", "")).strip() != token:
@@ -662,8 +692,46 @@ def auto_scalping_loop() -> None:
     while True:
         try:
             position_client = BinanceClient(symbol=symbols[0] if symbols else None)
-            open_count = len(position_client.open_positions())
+            positions = position_client.open_positions()
+            open_count = len(positions)
             max_positions = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
+
+            # AUTO FORCE CLOSE PROFIT UNTUK SEMUA POSISI TERBUKA
+            # Jika posisi sudah terlalu lama dan sudah profit kecil, bot tutup market.
+            # Setting dari .env:
+            # MAX_HOLD_SECONDS=300
+            # FORCE_CLOSE_PROFIT_PERCENT=0.15
+            max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "300"))
+            force_close_profit_percent = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PERCENT", "0.15"))
+
+            for position in positions:
+                try:
+                    position_symbol = str(position.get("symbol", "")).upper()
+                    position_amount = Decimal(str(position.get("positionAmt", "0")))
+                    if not position_symbol or position_amount == 0:
+                        continue
+
+                    pnl_percent = Decimal(str(position.get("pnlPercent", "0")))
+                    update_time_ms = int(position.get("updateTime", "0") or "0")
+                    if update_time_ms > 0:
+                        hold_seconds = int(time.time() - (update_time_ms / 1000))
+                    else:
+                        hold_seconds = max_hold_seconds
+
+                    if pnl_percent >= force_close_profit_percent and hold_seconds >= max_hold_seconds:
+                        close_client = BinanceClient(symbol=position_symbol)
+                        side_label = "LONG" if position_amount > 0 else "SHORT"
+                        print(
+                            f"[FORCE CLOSE PROFIT] {position_symbol} {side_label} "
+                            f"pnl={pnl_percent}% hold={hold_seconds}s"
+                        )
+                        close_result = close_client.close_position_amount(position_amount)
+                        print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
+                        open_count = max(0, open_count - 1)
+
+                except Exception as close_error:
+                    print(f"[FORCE CLOSE ERROR] {close_error}")
+
             for symbol in symbols:
                 try:
                     signal_info = generate_auto_signal(symbol)
