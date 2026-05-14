@@ -617,6 +617,12 @@ def generate_auto_signal(symbol: str) -> dict:
     last_close = closes[-1]
     buy_rsi = Decimal(os.getenv("BUY_RSI", "55"))
     sell_rsi = Decimal(os.getenv("SELL_RSI", "45"))
+    
+    # Perketat sinyal khusus untuk GOLD karena volatilitas tinggi
+    if symbol in {"XAUUSDT", "XAUUSD"}:
+        buy_rsi = Decimal("60")  # Harus lebih bullish
+        sell_rsi = Decimal("40") # Harus lebih bearish
+
     has_volume = volume_ok(volumes)
     signal = None
     reason = "NO SIGNAL"

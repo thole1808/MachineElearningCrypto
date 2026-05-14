@@ -162,6 +162,7 @@ export default function Home() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
+  const [hideBalance, setHideBalance] = useState(false);
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -260,18 +261,20 @@ export default function Home() {
   );
   const showIdr = balanceCurrency === "IDR";
   const formatBalance = useCallback((usdtValue?: string, idrValue?: string) => {
+    if (hideBalance) return "***";
     if (showIdr) return formatIdr(idrValue);
     return formatUsd(usdtValue);
-  }, [showIdr]);
+  }, [showIdr, hideBalance]);
   const idrRate = Number(balanceSummary?.usdt_idr_rate || 0);
 
   const formatAnySignedUsd = useCallback((value?: string) => {
     if (!value) return "-";
+    if (hideBalance) return "***";
     if (showIdr && idrRate) {
       return formatIdr(String(Number(value) * idrRate));
     }
     return formatSignedUsd(value);
-  }, [showIdr, idrRate]);
+  }, [showIdr, idrRate, hideBalance]);
 
   return (
     <main className="terminal">
@@ -376,7 +379,21 @@ export default function Home() {
         <section className="panel glass account-panel">
           <header className="panel-head balance-headline">
             <div>
-              <h2>Account</h2>
+              <h2 style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                Account
+                <button
+                  type="button"
+                  onClick={() => setHideBalance(!hideBalance)}
+                  style={{ background: "transparent", border: "none", color: "var(--muted)", padding: 0 }}
+                  title="Toggle Balance Visibility"
+                >
+                  {hideBalance ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                  )}
+                </button>
+              </h2>
               <p>USDT/IDR {formatIdr(balanceSummary?.usdt_idr_rate || undefined)}</p>
             </div>
             <div className="segmented" aria-label="Pilih mata uang saldo">
