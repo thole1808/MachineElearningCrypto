@@ -99,6 +99,27 @@ h2 {
   color: #5f4b07;
 }
 
+.alert strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.alert ul {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.6;
+}
+
+.success {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid #9fd4bf;
+  border-radius: 8px;
+  background: #e8f7f0;
+  color: #176149;
+  font-weight: 700;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));

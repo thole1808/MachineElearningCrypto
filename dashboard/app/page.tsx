@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Balance = {
   asset: string;
@@ -30,6 +30,7 @@ export default function Home() {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [checked, setChecked] = useState(false);
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -53,9 +54,36 @@ export default function Home() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Terjadi error tidak dikenal.");
     } finally {
+      setChecked(true);
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      checkBinance();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const setupMessages = useMemo(() => {
+    const messages: string[] = [];
+    if (!status) return messages;
+    if (status.mode !== "live") {
+      messages.push("Mode masih testnet. Buat file .env di root project dan set BINANCE_MODE=live.");
+    }
+    if (status.key_type !== "rsa") {
+      messages.push("Key type masih HMAC. Untuk API key Binance official RSA, set BINANCE_KEY_TYPE=rsa.");
+    }
+    if (!status.has_keys) {
+      messages.push("API key belum terbaca. Isi BINANCE_API_KEY di file .env, lalu restart ./start-web.sh.");
+    }
+    if (!status.private_key_configured && status.key_type === "rsa") {
+      messages.push("Private key RSA belum terdeteksi. Pastikan BINANCE_PRIVATE_KEY_PATH=private_key.pem.");
+    }
+    return messages;
+  }, [status]);
 
   return (
     <main className="page">
@@ -73,6 +101,19 @@ export default function Home() {
       </section>
 
       {error ? <section className="alert">{error}</section> : null}
+      {!error && setupMessages.length ? (
+        <section className="alert">
+          <strong>Setup belum lengkap</strong>
+          <ul>
+            {setupMessages.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {!error && checked && status?.has_keys ? (
+        <section className="success">Koneksi Binance terbaca. Bot masih mode monitor, belum mengeksekusi order.</section>
+      ) : null}
 
       <section className="grid">
         <article className="metric">
