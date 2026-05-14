@@ -58,6 +58,7 @@ Bot ini disiapkan untuk Binance Testnet lebih dulu. Jangan mulai dari live tradi
 
 ```env
 BINANCE_MODE=testnet
+BINANCE_KEY_TYPE=hmac
 BINANCE_API_KEY=isi_api_key_testnet
 BINANCE_API_SECRET=isi_api_secret_testnet
 TRADE_SYMBOL=BTCUSDT
@@ -72,6 +73,31 @@ python3 app.py
 8. Buka `http://127.0.0.1:8765`, lalu klik **Cek Binance**.
 
 Live trading sengaja belum diaktifkan. Tahap aman berikutnya adalah backtest, paper trading, pembatas risiko, lalu modal kecil jika semua stabil.
+
+## Pakai Binance Official RSA
+
+Jika API key dibuat langsung di Binance official dengan tipe RSA:
+
+1. Simpan private key lokal sebagai `private_key.pem` di root project.
+2. Jangan commit `private_key.pem`; file `.pem` sudah di-ignore.
+3. Isi `.env`:
+
+```env
+BINANCE_MODE=live
+BINANCE_KEY_TYPE=rsa
+BINANCE_API_KEY=isi_api_key_baru_anda
+BINANCE_PRIVATE_KEY_PATH=private_key.pem
+TRADE_SYMBOL=BTCUSDT
+```
+
+Bot saat ini hanya mengecek koneksi, harga, dan saldo. Fitur order live sengaja belum dibuat sampai strategi, backtest, dan batas risiko siap.
+
+Untuk keamanan API key official:
+
+- Jangan aktifkan withdrawal.
+- Matikan permission yang belum dipakai, misalnya Futures jika belum dipakai.
+- Gunakan IP restriction jika memungkinkan.
+- Revoke dan buat ulang API key jika pernah terlihat di chat, screenshot, livestream, atau GitHub.
 
 Jika muncul error `CERTIFICATE_VERIFY_FAILED` di macOS, jalankan installer sertifikat Python dari Finder atau Terminal. Umumnya ada di:
 

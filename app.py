@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
 import hmac
 import os
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -24,7 +26,16 @@ class BinanceClient:
         self.symbol = os.getenv("TRADE_SYMBOL", "BTCUSDT").strip().upper()
         self.api_key = os.getenv("BINANCE_API_KEY", "").strip()
         self.api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
+        self.key_type = os.getenv("BINANCE_KEY_TYPE", "hmac").strip().lower()
+        self.private_key_path = self.resolve_private_key_path()
         self.base_url = self.resolve_base_url()
+
+    def resolve_private_key_path(self) -> Path:
+        configured = os.getenv("BINANCE_PRIVATE_KEY_PATH", "private_key.pem").strip()
+        path = Path(configured)
+        if not path.is_absolute():
+            path = ROOT / path
+        return path
 
     def resolve_base_url(self) -> str:
         custom_url = os.getenv("BINANCE_BASE_URL", "").strip().rstrip("/")
@@ -43,8 +54,8 @@ class BinanceClient:
         return self.fetch_json(request)
 
     def signed_get(self, path: str, params: dict[str, str] | None = None) -> dict:
-        if not self.api_key or not self.api_secret:
-            raise ValueError("BINANCE_API_KEY dan BINANCE_API_SECRET belum diisi.")
+        if not self.api_key:
+            raise ValueError("BINANCE_API_KEY belum diisi.")
 
         payload = {
             **(params or {}),
@@ -52,18 +63,50 @@ class BinanceClient:
             "recvWindow": "5000",
         }
         query = urllib.parse.urlencode(payload)
-        signature = hmac.new(
-            self.api_secret.encode("utf-8"),
-            query.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        url = f"{self.base_url}{path}?{query}&signature={signature}"
+        signature = self.sign_query(query)
+        signed_query = urllib.parse.urlencode({**payload, "signature": signature})
+        url = f"{self.base_url}{path}?{signed_query}"
         request = urllib.request.Request(
             url,
             headers={"X-MBX-APIKEY": self.api_key},
             method="GET",
         )
         return self.fetch_json(request)
+
+    def sign_query(self, query: str) -> str:
+        if self.key_type == "rsa":
+            return self.rsa_signature(query)
+
+        if not self.api_secret:
+            raise ValueError("BINANCE_API_SECRET belum diisi untuk key type HMAC.")
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return signature
+
+    def rsa_signature(self, query: str) -> str:
+        if not self.private_key_path.exists():
+            raise ValueError(f"Private key RSA tidak ditemukan: {self.private_key_path}")
+
+        command = [
+            "openssl",
+            "dgst",
+            "-sha256",
+            "-sign",
+            str(self.private_key_path),
+        ]
+        result = subprocess.run(
+            command,
+            input=query.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Gagal membuat RSA signature dengan OpenSSL: {detail}")
+        return base64.b64encode(result.stdout).decode("ascii")
 
     def fetch_json(self, request: urllib.request.Request) -> dict:
         try:
@@ -78,11 +121,13 @@ class BinanceClient:
             "mode": self.mode,
             "symbol": self.symbol,
             "base_url": self.base_url,
-            "has_keys": bool(self.api_key and self.api_secret),
+            "key_type": self.key_type,
+            "has_keys": self.has_signed_credentials(),
+            "private_key_configured": self.key_type == "rsa" and self.private_key_path.exists(),
         }
         result["server_time"] = self.public_get("/api/v3/time")
         result["price"] = self.public_get("/api/v3/ticker/price", {"symbol": self.symbol})
-        if self.api_key and self.api_secret:
+        if self.has_signed_credentials():
             account = self.signed_get("/api/v3/account")
             result["balances"] = [
                 balance
@@ -90,6 +135,11 @@ class BinanceClient:
                 if float(balance.get("free", "0")) > 0 or float(balance.get("locked", "0")) > 0
             ]
         return result
+
+    def has_signed_credentials(self) -> bool:
+        if self.key_type == "rsa":
+            return bool(self.api_key and self.private_key_path.exists())
+        return bool(self.api_key and self.api_secret)
 
 
 def load_dotenv() -> None:
@@ -136,10 +186,10 @@ def local_reply(message: str) -> str:
     text = message.lower()
     if any(word in text for word in ["binance", "testnet", "btc", "crypto"]):
         return (
-            "Saya sudah bisa disiapkan untuk Binance, tapi kunci aman dulu: gunakan Testnet. "
-            "Isi `BINANCE_API_KEY` dan `BINANCE_API_SECRET` di `.env`, set `BINANCE_MODE=testnet`, "
-            "lalu klik tombol Cek Binance di UI. Live trading baru kita aktifkan setelah backtest "
-            "dan paper trading stabil."
+            "Saya sudah bisa disiapkan untuk Binance. Untuk key RSA official, isi "
+            "`BINANCE_KEY_TYPE=rsa`, `BINANCE_API_KEY`, dan `BINANCE_PRIVATE_KEY_PATH` di `.env`. "
+            "Bot saat ini hanya membaca status/saldo; live order tetap belum diaktifkan sampai "
+            "backtest dan batas risiko siap."
         )
 
     if any(word in text for word in ["xau", "gold", "emas", "trading", "signal"]):

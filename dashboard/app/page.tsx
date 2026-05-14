@@ -12,7 +12,9 @@ type BinanceStatus = {
   mode: string;
   symbol: string;
   base_url: string;
+  key_type: string;
   has_keys: boolean;
+  private_key_configured: boolean;
   server_time?: { serverTime: number };
   price?: { symbol: string; price: string };
   balances?: Balance[];
@@ -92,6 +94,10 @@ export default function Home() {
           <span>API Key</span>
           <strong>{status?.has_keys ? "Terpasang" : "Belum diisi"}</strong>
         </article>
+        <article className="metric">
+          <span>Key Type</span>
+          <strong>{status?.key_type?.toUpperCase() || "-"}</strong>
+        </article>
       </section>
 
       <section className="split">
@@ -110,11 +116,15 @@ export default function Home() {
               <dt>Server Time</dt>
               <dd>{serverTime}</dd>
             </div>
+            <div>
+              <dt>Private Key RSA</dt>
+              <dd>{status?.private_key_configured ? "Terdeteksi lokal" : "Belum terdeteksi"}</dd>
+            </div>
           </dl>
         </article>
 
         <article className="panel">
-          <h2>Saldo Testnet</h2>
+          <h2>Saldo Binance</h2>
           {status?.balances?.length ? (
             <div className="table">
               {status.balances.map((balance) => (
@@ -126,7 +136,7 @@ export default function Home() {
               ))}
             </div>
           ) : (
-            <p className="empty">Belum ada saldo terbaca. Isi API key testnet lalu cek ulang.</p>
+            <p className="empty">Belum ada saldo terbaca. Isi kredensial Binance lalu cek ulang.</p>
           )}
         </article>
       </section>
