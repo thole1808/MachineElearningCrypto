@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local Bot XAU/USD</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <header class="topbar">
+          <div>
+            <h1>Local Bot XAU/USD</h1>
+            <p>Bot lokal untuk eksperimen ChatGPT, data, dan machine learning.</p>
+          </div>
+          <div class="actions">
+            <button id="binance-check" class="ghost" type="button">Cek Binance</button>
+            <span id="status" class="status">Local</span>
+          </div>
+        </header>
+
+        <div id="chat" class="chat" aria-live="polite">
+          <article class="bubble assistant">
+            <p>Halo. Saya sudah jalan di laptop ini. Kirim pesan pertama untuk mulai.</p>
+          </article>
+        </div>
+
+        <form id="form" class="composer">
+          <textarea
+            id="message"
+            rows="2"
+            placeholder="Tulis pesan..."
+            autocomplete="off"
+          ></textarea>
+          <button id="send" type="submit">Kirim</button>
+        </form>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

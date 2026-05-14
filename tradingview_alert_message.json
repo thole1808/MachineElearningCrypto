@@ -1,0 +1,7 @@
+{
+  "token": "ganti-token-rahasia",
+  "symbol": "{{ticker}}",
+  "side": "{{strategy.order.action}}",
+  "leverage": 3,
+  "usdt": 5
+}
