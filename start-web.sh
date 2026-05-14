@@ -15,13 +15,20 @@ if [ ! -d "$DASHBOARD_DIR/node_modules" ]; then
 fi
 
 echo "Starting Python backend: ${BOT_API_URL}"
-(cd "$ROOT_DIR" && python3 app.py) &
-BACKEND_PID=$!
+BACKEND_PID=""
+if lsof -ti tcp:"$BACKEND_PORT" >/dev/null 2>&1; then
+  echo "Backend port ${BACKEND_PORT} is already in use; reusing the running backend."
+else
+  (cd "$ROOT_DIR" && python3 app.py) &
+  BACKEND_PID=$!
+fi
 
 cleanup() {
   echo
   echo "Stopping local services..."
-  kill "$BACKEND_PID" >/dev/null 2>&1 || true
+  if [ -n "$BACKEND_PID" ]; then
+    kill "$BACKEND_PID" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
