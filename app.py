@@ -289,6 +289,13 @@ class BinanceClient:
                 return Decimal(str(item.get("tickSize", "0.0001")))
         return Decimal("0.0001")
 
+    def min_notional(self) -> Decimal:
+        symbol_info = self.exchange_symbol_info()
+        for item in symbol_info.get("filters", []):
+            if item.get("filterType") in {"MIN_NOTIONAL", "NOTIONAL"}:
+                return Decimal(str(item.get("notional", item.get("minNotional", "0"))))
+        return Decimal("0")
+
     def round_quantity(self, quantity: Decimal) -> str:
         step = self.quantity_step()
         rounded = (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
@@ -303,6 +310,13 @@ class BinanceClient:
         amount = usdt_amount or Decimal(os.getenv("ORDER_USDT", "5"))
         leverage = Decimal(os.getenv("DEFAULT_LEVERAGE", "3"))
         notional = amount * leverage
+        min_notional = self.min_notional()
+        if min_notional > 0 and notional < min_notional:
+            minimum_margin = (min_notional / leverage).quantize(Decimal("0.01"))
+            raise ValueError(
+                f"Notional {notional} USDT terlalu kecil untuk {self.symbol}. "
+                f"Minimum {min_notional} USDT. Naikkan ORDER_USDT minimal sekitar {minimum_margin}."
+            )
         quantity = notional / self.get_price()
         rounded = self.round_quantity(quantity)
         if Decimal(rounded) <= 0:
@@ -358,14 +372,22 @@ class BinanceClient:
             unrealized_profit = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
             leverage = Decimal(str(position.get("leverage", os.getenv("DEFAULT_LEVERAGE", "1"))))
             notional = abs(Decimal(str(position.get("notional", "0"))))
+            tp_percent = Decimal(os.getenv("TP_PERCENT", os.getenv("TAKE_PROFIT_PERCENT", "1")))
+            sl_percent = Decimal(os.getenv("SL_PERCENT", os.getenv("STOP_LOSS_PERCENT", "0.5")))
             if entry > 0 and mark > 0:
                 if amount > 0:
                     pnl_percent = ((mark - entry) / entry) * Decimal("100")
-                    position["tpHitDirection"] = "mark >= TP" if mark >= entry else "mark < TP"
+                    tp_price = entry * (Decimal("1") + tp_percent / Decimal("100"))
+                    sl_price = entry * (Decimal("1") - sl_percent / Decimal("100"))
+                    position["tpHitDirection"] = "mark >= TP" if mark >= tp_price else "mark < TP"
                 else:
                     pnl_percent = ((entry - mark) / entry) * Decimal("100")
-                    position["tpHitDirection"] = "mark <= TP" if mark <= entry else "mark > TP"
+                    tp_price = entry * (Decimal("1") - tp_percent / Decimal("100"))
+                    sl_price = entry * (Decimal("1") + sl_percent / Decimal("100"))
+                    position["tpHitDirection"] = "mark <= TP" if mark <= tp_price else "mark > TP"
                 position["pnlPercent"] = str(pnl_percent)
+                position["takeProfitPrice"] = self.round_price(tp_price)
+                position["stopLossPrice"] = self.round_price(sl_price)
             if notional > 0 and leverage > 0:
                 initial_margin = notional / leverage
                 position["roePercent"] = str((unrealized_profit / initial_margin) * Decimal("100"))
@@ -633,18 +655,25 @@ def auto_scalping_loop() -> None:
     print("=" * 70)
     while True:
         try:
+            position_client = BinanceClient(symbol=symbols[0] if symbols else None)
+            open_count = len(position_client.open_positions())
+            max_positions = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
             for symbol in symbols:
                 try:
                     signal_info = generate_auto_signal(symbol)
                     print(
                         f"[SCAN] {symbol} | signal={signal_info['signal']} | "
-                        f"rsi={signal_info['rsi']} | reason={signal_info['reason']}"
+                        f"rsi={signal_info['rsi']} | open={open_count}/{max_positions} | "
+                        f"reason={signal_info['reason']}"
                     )
                     if not signal_info["signal"]:
                         continue
                     client = BinanceClient(symbol=symbol)
                     if env_bool("PREVENT_DOUBLE_POSITION", "true") and client.has_open_position():
                         print(f"[SKIP] {symbol} masih punya posisi terbuka.")
+                        continue
+                    if client.has_reached_max_open_positions():
+                        print(f"[SKIP] {symbol} batas MAX_OPEN_POSITIONS tercapai.")
                         continue
                     payload = {
                         "symbol": symbol,
@@ -655,6 +684,8 @@ def auto_scalping_loop() -> None:
                     print(f"[AUTO ENTRY] {payload}")
                     result = client.handle_webhook_signal(payload)
                     print("[AUTO RESULT]", json.dumps(result, ensure_ascii=False))
+                    if result.get("accepted"):
+                        open_count += 1
                 except Exception as error:
                     print(f"[PAIR ERROR] {symbol}: {error}")
             time.sleep(interval_seconds)

@@ -45,6 +45,8 @@ type OpenPosition = {
   marginType?: string;
   pnlPercent?: string;
   roePercent?: string;
+  takeProfitPrice?: string;
+  stopLossPrice?: string;
   positionSide?: string;
 };
 
@@ -68,23 +70,6 @@ type ApiResponse = {
   error?: string;
 };
 
-type MarketSymbol = {
-  symbol: string;
-  base_asset: string;
-  quote_asset: string;
-  status: string;
-};
-
-type SymbolsResponse = {
-  ok: boolean;
-  market?: {
-    mode: string;
-    count: number;
-    symbols: MarketSymbol[];
-  };
-  error?: string;
-};
-
 type AutoSignal = {
   symbol: string;
   interval: string;
@@ -102,7 +87,6 @@ type AutoSignalResponse = {
   error?: string;
 };
 
-const quoteFilters = ["USDT", "USDC", "BTC", "ETH", "BNB"] as const;
 const defaultSymbol = "SOLUSDT";
 const realtimeRefreshMs = 2000;
 type BalanceCurrency = "USDT" | "IDR";
@@ -125,7 +109,8 @@ function formatNumber(value?: string) {
 function formatSignedUsd(value?: string) {
   if (!value) return "-";
   const number = Number(value);
-  return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", {
+  const rounded = Math.round(number);
+  return `${rounded > 0 ? "+" : ""}${rounded.toLocaleString("en-US", {
     maximumFractionDigits: 0,
   })} USDT`;
 }
@@ -141,28 +126,36 @@ function formatPercent(value?: string) {
 
 function formatUsd(value?: string) {
   if (!value) return "-";
-  return `${Number(value).toLocaleString("en-US", {
+  return `${Math.round(Number(value)).toLocaleString("en-US", {
     maximumFractionDigits: 0,
   })} USDT`;
 }
 
 function formatIdr(value?: string) {
   if (!value) return "-";
-  return Number(value).toLocaleString("id-ID", {
+  return Math.round(Number(value)).toLocaleString("id-ID", {
     style: "currency",
     currency: "IDR",
     maximumFractionDigits: 0,
   });
 }
 
+function roundedNumber(value?: string) {
+  if (!value) return 0;
+  return Math.round(Number(value));
+}
+
+function toneClass(value?: string) {
+  const rounded = roundedNumber(value);
+  if (rounded > 0) return "up";
+  if (rounded < 0) return "down";
+  return "";
+}
+
 export default function Home() {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
-  const [symbols, setSymbols] = useState<MarketSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState(defaultSymbol);
-  const [search, setSearch] = useState("");
-  const [quoteFilter, setQuoteFilter] = useState<(typeof quoteFilters)[number]>("USDT");
   const [error, setError] = useState("");
-  const [symbolsError, setSymbolsError] = useState("");
   const [signalError, setSignalError] = useState("");
   const [loading, setLoading] = useState(false);
   const [checked, setChecked] = useState(false);
@@ -208,20 +201,6 @@ export default function Home() {
     }
   }, [selectedSymbol]);
 
-  const loadSymbols = useCallback(async () => {
-    setSymbolsError("");
-    try {
-      const response = await fetch("/api/binance/symbols");
-      const body = (await response.json()) as SymbolsResponse;
-      if (!response.ok || !body.ok || !body.market) {
-        throw new Error(body.error || "Backend belum bisa membaca daftar pair Binance.");
-      }
-      setSymbols(body.market.symbols);
-    } catch (caught) {
-      setSymbolsError(caught instanceof Error ? caught.message : "Terjadi error saat membaca daftar pair.");
-    }
-  }, []);
-
   const loadAutoSignal = useCallback(async () => {
     try {
       const response = await fetch(`/api/auto-signal?symbol=${selectedSymbol}`);
@@ -235,14 +214,6 @@ export default function Home() {
       setSignalError(caught instanceof Error ? caught.message : "Terjadi error saat membaca signal.");
     }
   }, [selectedSymbol]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      loadSymbols();
-    }, 0);
-
-    return () => window.clearTimeout(timer);
-  }, [loadSymbols]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -296,31 +267,23 @@ export default function Home() {
     if (showIdr) return formatIdr(idrValue);
     return formatSignedUsd(usdtValue);
   }, [showIdr]);
-  const visibleSymbols = useMemo(() => {
-    const needle = search.trim().toUpperCase();
-    return symbols
-      .filter((item) => item.quote_asset === quoteFilter)
-      .filter((item) => {
-        if (!needle) return true;
-        return item.symbol.includes(needle) || item.base_asset.includes(needle);
-      })
-      .slice(0, 80);
-  }, [quoteFilter, search, symbols]);
-
   return (
-    <main className="page">
-      <section className="hero">
+    <main className="terminal">
+      <header className="topbar">
         <div>
-          <p className="eyebrow">Local Binance Testnet Monitor</p>
+          <p className="eyebrow">Futures Trading Console</p>
           <h1>Machine Elearning Crypto</h1>
-          <p className="subcopy">
-            Pantau koneksi bot lokal, posisi Futures aktif, saldo, dan sinyal scalping otomatis.
-          </p>
         </div>
-        <button className="primary" disabled={loading} onClick={() => checkBinance(true)}>
-          {loading ? "Mengecek..." : "Cek Binance"}
-        </button>
-      </section>
+        <div className="topbar-actions">
+          <span className={status?.has_keys ? "status-pill live" : "status-pill danger"}>
+            {status?.has_keys ? "Binance Live" : "Disconnected"}
+          </span>
+          <span className="status-pill">Update {lastUpdated}</span>
+          <button className="primary" disabled={loading} onClick={() => checkBinance(true)}>
+            {loading ? "Syncing" : "Refresh"}
+          </button>
+        </div>
+      </header>
 
       {error ? <section className="alert">{error}</section> : null}
       {!error && setupMessages.length ? (
@@ -333,211 +296,82 @@ export default function Home() {
           </ul>
         </section>
       ) : null}
-      {!error && checked && status?.has_keys ? (
-        <section className="success live-status">
-          <span>Koneksi Binance terbaca. Realtime refresh tiap {realtimeRefreshMs / 1000} detik.</span>
-          <strong>Update {lastUpdated}</strong>
-        </section>
-      ) : null}
 
-      <section className="market-panel">
-        <header className="panel-head">
-          <div>
-            <h2>Market Scanner</h2>
-            <p>Pilih pair Binance untuk cek harga dan sinyal otomatis.</p>
-          </div>
-          <input
-            className="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Cari BTC, ETH, SOL..."
-          />
-        </header>
-        {symbolsError ? <div className="alert compact">{symbolsError}</div> : null}
-        <div className="toolbar left">
-          {quoteFilters.map((quote) => (
-            <button
-              className={quote === quoteFilter ? "chip active" : "chip"}
-              key={quote}
-              type="button"
-              onClick={() => setQuoteFilter(quote)}
-            >
-              {quote}
-            </button>
-          ))}
-        </div>
-        <div className="symbol-list">
-          {visibleSymbols.map((item) => (
-            <button
-              className={item.symbol === selectedSymbol ? "symbol-button active" : "symbol-button"}
-              key={item.symbol}
-              type="button"
-              onClick={() => setSelectedSymbol(item.symbol)}
-            >
-              <strong>{item.symbol}</strong>
-              <span>
-                {item.base_asset}/{item.quote_asset}
-              </span>
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="grid">
-        <article className="metric">
-          <span>Mode</span>
-          <strong>{status?.mode || "Belum dicek"}</strong>
+      <section className="summary-grid">
+        <article className="metric hero-metric">
+          <span>Wallet ({balanceCurrency})</span>
+          <strong>{formatBalance(balanceSummary?.wallet_usdt, balanceSummary?.wallet_idr)}</strong>
         </article>
         <article className="metric">
-          <span>Symbol</span>
-          <strong>{status?.symbol || selectedSymbol}</strong>
-        </article>
-        <article className="metric">
-          <span>Harga</span>
-          <strong className="price-value">{formatPrice(status?.price?.price)}</strong>
-        </article>
-        <article className="metric">
-          <span>API Key</span>
-          <strong>{status?.has_keys ? "Terpasang" : "Belum diisi"}</strong>
-        </article>
-        <article className="metric">
-          <span>Key Type</span>
-          <strong>{status?.key_type?.toUpperCase() || "-"}</strong>
-        </article>
-        <article className="metric">
-          <span>Posisi Aktif</span>
-          <strong>{openPositions.length}</strong>
+          <span>Available</span>
+          <strong>{formatBalance(balanceSummary?.available_usdt, balanceSummary?.available_idr)}</strong>
         </article>
         <article className="metric">
           <span>Floating PnL</span>
           <strong className={totalUnrealizedPnl >= 0 ? "up" : "down"}>{formatSignedUsd(String(totalUnrealizedPnl))}</strong>
         </article>
         <article className="metric">
-          <span>Futures Wallet ({balanceCurrency})</span>
-          <strong>{formatBalance(balanceSummary?.wallet_usdt, balanceSummary?.wallet_idr)}</strong>
+          <span>Active Positions</span>
+          <strong>{openPositions.length}</strong>
         </article>
         <article className="metric">
-          <span>Available ({balanceCurrency})</span>
-          <strong>{formatBalance(balanceSummary?.available_usdt, balanceSummary?.available_idr)}</strong>
-        </article>
-        <article className="metric">
-          <span>Margin ({balanceCurrency})</span>
-          <strong>{formatBalance(balanceSummary?.margin_usdt, balanceSummary?.margin_idr)}</strong>
+          <span>{status?.symbol || selectedSymbol}</span>
+          <strong className="price-value">{formatPrice(status?.price?.price)}</strong>
         </article>
       </section>
 
-      <section className="panel positions-panel">
-        <header className="panel-head">
-          <div>
-            <h2>Posisi Aktif</h2>
-            <p>Hanya menampilkan pair Futures yang benar-benar sedang masuk posisi.</p>
-          </div>
-        </header>
-        {openPositions.length ? (
-          <div className="positions-table">
-            <div className="positions-row positions-head">
-              <span>Pair</span>
-              <span>Side</span>
-              <span>Qty</span>
-              <span>Entry</span>
-              <span>Mark</span>
-              <span>PnL</span>
-              <span>ROE</span>
-              <span>Liq.</span>
+      <section className="workspace">
+        <section className="panel positions-panel">
+          <header className="panel-head">
+            <div>
+              <h2>Open Positions</h2>
+              <p>Entry, mark, target TP/SL, ROE, dan liquidation realtime.</p>
             </div>
-            {openPositions.map((position) => {
-              const amount = Number(position.positionAmt);
-              const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
-              const pnl = Number(pnlValue);
-              return (
-                <div className="positions-row" key={position.symbol}>
-                  <strong>{position.symbol}</strong>
-                  <span className={amount >= 0 ? "up" : "down"}>{position.positionSide && position.positionSide !== "BOTH" ? position.positionSide : amount >= 0 ? "LONG" : "SHORT"}</span>
-                  <span>{formatNumber(position.positionAmt)}</span>
-                  <span>{formatPrice(position.entryPrice)}</span>
-                  <span>{formatPrice(position.markPrice)}</span>
-                  <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(pnlValue)}</span>
-                  <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.roePercent ?? position.pnlPercent)}</span>
-                  <span>{formatPrice(position.liquidationPrice)}</span>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="empty">Belum ada posisi aktif yang terbaca.</p>
-        )}
-      </section>
+          </header>
+          {openPositions.length ? (
+            <div className="positions-table">
+              <div className="positions-row positions-head">
+                <span>Pair</span>
+                <span>Side</span>
+                <span>Qty</span>
+                <span>Entry</span>
+                <span>Mark</span>
+                <span>PnL</span>
+                <span>ROE</span>
+                <span>TP</span>
+                <span>SL</span>
+                <span>Liq.</span>
+              </div>
+              {openPositions.map((position) => {
+                const amount = Number(position.positionAmt);
+                const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
+                const pnl = Number(pnlValue);
+                return (
+                  <div className="positions-row" key={position.symbol}>
+                    <strong>{position.symbol}</strong>
+                    <span className={amount >= 0 ? "up" : "down"}>{position.positionSide && position.positionSide !== "BOTH" ? position.positionSide : amount >= 0 ? "LONG" : "SHORT"}</span>
+                    <span>{formatNumber(position.positionAmt)}</span>
+                    <span>{formatPrice(position.entryPrice)}</span>
+                    <span>{formatPrice(position.markPrice)}</span>
+                    <span className={pnl >= 0 ? "up" : "down"}>{formatSignedUsd(pnlValue)}</span>
+                    <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.roePercent ?? position.pnlPercent)}</span>
+                    <span>{formatPrice(position.takeProfitPrice)}</span>
+                    <span>{formatPrice(position.stopLossPrice)}</span>
+                    <span>{formatPrice(position.liquidationPrice)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="empty">Belum ada posisi aktif.</p>
+          )}
+        </section>
 
-      <section className="panel" style={{ marginTop: "24px", marginBottom: "24px" }}>
-        <header className="panel-head">
-          <div>
-            <h2>Auto Signal Scanner (Real-time)</h2>
-            <p>Sinyal scalping pair yang sedang dipilih. Otomatis refresh tiap {realtimeRefreshMs / 1000} detik.</p>
-          </div>
-        </header>
-        {signalError ? <div className="alert compact">{signalError}</div> : null}
-        <div className="candle-stats" style={{ marginTop: "16px" }}>
-          <div>
-            <span>Pair</span>
-            <strong>{autoSignal?.symbol || selectedSymbol}</strong>
-          </div>
-          <div>
-            <span>Sinyal</span>
-            <strong className={autoSignal?.signal === "BUY" ? "up" : autoSignal?.signal === "SELL" ? "down" : ""}>
-              {autoSignal?.signal || "NO SIGNAL"}
-            </strong>
-          </div>
-          <div>
-            <span>Alasan</span>
-            <strong>{autoSignal?.reason || "-"}</strong>
-          </div>
-          <div>
-            <span>RSI</span>
-            <strong>{autoSignal?.rsi || "-"}</strong>
-          </div>
-          <div>
-            <span>EMA Fast</span>
-            <strong>{formatPrice(autoSignal?.ema_fast)}</strong>
-          </div>
-          <div>
-            <span>EMA Slow</span>
-            <strong>{formatPrice(autoSignal?.ema_slow)}</strong>
-          </div>
-          <div>
-            <span>Close</span>
-            <strong>{formatPrice(autoSignal?.close)}</strong>
-          </div>
-        </div>
-      </section>
-
-      <section className="split">
-        <article className="panel">
-          <h2>Koneksi</h2>
-          <dl>
-            <div>
-              <dt>Backend</dt>
-              <dd>Next.js proxy ke Python backend</dd>
-            </div>
-            <div>
-              <dt>Binance URL</dt>
-              <dd>{status?.base_url || "-"}</dd>
-            </div>
-            <div>
-              <dt>Server Time</dt>
-              <dd>{serverTime}</dd>
-            </div>
-            <div>
-              <dt>Private Key RSA</dt>
-              <dd>{status?.private_key_configured ? "Terdeteksi lokal" : "Belum terdeteksi"}</dd>
-            </div>
-          </dl>
-        </article>
-
-        <article className="panel">
+        <section className="panel account-panel">
           <header className="panel-head balance-headline">
             <div>
-              <h2>Saldo Futures</h2>
-              <p>Rate USDT/IDR: {formatIdr(balanceSummary?.usdt_idr_rate || undefined)}</p>
+              <h2>Account</h2>
+              <p>USDT/IDR {formatIdr(balanceSummary?.usdt_idr_rate || undefined)}</p>
             </div>
             <div className="segmented" aria-label="Pilih mata uang saldo">
               {(["USDT", "IDR"] as const).map((currency) => (
@@ -557,27 +391,64 @@ export default function Home() {
               <div className="balance-row balance-head">
                 <span>Asset</span>
                 <span>Wallet</span>
-                <span>Available</span>
-                <span>Unrealized</span>
-                <span>Margin</span>
+                <span>Avail.</span>
+                <span>U-PnL</span>
               </div>
               {futuresBalances.map((balance) => {
-                const unrealized = Number(balance.unrealizedUsdt || balance.unrealizedProfit || 0);
+                const unrealizedValue = balance.unrealizedUsdt || balance.unrealizedProfit || "0";
                 return (
                   <div className="balance-row" key={balance.asset}>
                     <strong>{balance.asset}</strong>
                     <span>{formatBalance(balance.walletUsdt ?? balance.walletBalance ?? balance.free, balance.walletIdr)}</span>
                     <span>{formatBalance(balance.availableUsdt ?? balance.availableBalance ?? balance.free, balance.availableIdr)}</span>
-                    <span className={unrealized >= 0 ? "up" : "down"}>{formatSignedBalance(balance.unrealizedUsdt || balance.unrealizedProfit || "0", balance.unrealizedIdr)}</span>
-                    <span>{formatBalance(balance.marginUsdt ?? balance.marginBalance ?? balance.locked, balance.marginIdr)}</span>
+                    <span className={toneClass(showIdr ? balance.unrealizedIdr : unrealizedValue)}>{formatSignedBalance(unrealizedValue, balance.unrealizedIdr)}</span>
                   </div>
                 );
               })}
             </div>
           ) : (
-            <p className="empty">Tidak ada saldo Futures non-zero yang terbaca.</p>
+            <p className="empty">Saldo Futures belum terbaca.</p>
           )}
-        </article>
+        </section>
+
+        <section className="panel signal-panel">
+          <header className="panel-head">
+            <div>
+              <h2>Signal</h2>
+              <p>Pair aktif refresh tiap {realtimeRefreshMs / 1000} detik.</p>
+            </div>
+            <strong className={autoSignal?.signal === "BUY" ? "signal-badge buy" : autoSignal?.signal === "SELL" ? "signal-badge sell" : "signal-badge"}>
+              {autoSignal?.signal || "NO SIGNAL"}
+            </strong>
+          </header>
+          {signalError ? <div className="alert compact">{signalError}</div> : null}
+          <div className="signal-grid">
+            <div>
+              <span>Pair</span>
+              <strong>{autoSignal?.symbol || selectedSymbol}</strong>
+            </div>
+            <div>
+              <span>RSI</span>
+              <strong>{autoSignal?.rsi || "-"}</strong>
+            </div>
+            <div>
+              <span>EMA Fast</span>
+              <strong>{formatPrice(autoSignal?.ema_fast)}</strong>
+            </div>
+            <div>
+              <span>EMA Slow</span>
+              <strong>{formatPrice(autoSignal?.ema_slow)}</strong>
+            </div>
+            <div>
+              <span>Close</span>
+              <strong>{formatPrice(autoSignal?.close)}</strong>
+            </div>
+            <div className="signal-reason">
+              <span>Reason</span>
+              <strong>{autoSignal?.reason || "-"}</strong>
+            </div>
+          </div>
+        </section>
       </section>
     </main>
   );
