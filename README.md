@@ -14,6 +14,29 @@ Buka:
 http://127.0.0.1:8765
 ```
 
+## Dashboard Next.js
+
+Dashboard web berada di folder `dashboard/`.
+
+```bash
+cd dashboard
+npm install
+cp .env.local.example .env.local
+npm run dev
+```
+
+Buka:
+
+```text
+http://127.0.0.1:3000
+```
+
+Pastikan backend Python tetap berjalan di terminal lain:
+
+```bash
+python3 app.py
+```
+
 ## Pakai OpenAI API
 
 ```bash
@@ -26,9 +49,12 @@ Isi `OPENAI_API_KEY` di `.env`, lalu restart server.
 
 Bot ini disiapkan untuk Binance Testnet lebih dulu. Jangan mulai dari live trading.
 
-1. Buat API key di Binance Spot Testnet.
-2. Salin `.env.example` menjadi `.env`.
-3. Isi:
+1. Buka `https://testnet.binance.vision/`.
+2. Login dengan akun yang diminta oleh Binance Testnet.
+3. Buat API key testnet dari menu API Key.
+4. Simpan API Key dan Secret Key sekali itu saja. Jangan kirim ke chat dan jangan commit ke git.
+5. Salin `.env.example` menjadi `.env`.
+6. Isi:
 
 ```env
 BINANCE_MODE=testnet
@@ -37,13 +63,13 @@ BINANCE_API_SECRET=isi_api_secret_testnet
 TRADE_SYMBOL=BTCUSDT
 ```
 
-4. Jalankan ulang server:
+7. Jalankan ulang server:
 
 ```bash
 python3 app.py
 ```
 
-5. Buka `http://127.0.0.1:8765`, lalu klik **Cek Binance**.
+8. Buka `http://127.0.0.1:8765`, lalu klik **Cek Binance**.
 
 Live trading sengaja belum diaktifkan. Tahap aman berikutnya adalah backtest, paper trading, pembatas risiko, lalu modal kecil jika semua stabil.
 
@@ -57,6 +83,7 @@ Jika muncul error `CERTIFICATE_VERIFY_FAILED` di macOS, jalankan installer serti
 
 - `app.py` - server lokal dan endpoint chat.
 - `web/` - UI chat di browser.
+- `dashboard/` - dashboard monitoring berbasis Next.js.
 - `data/conversations.jsonl` - riwayat chat lokal, dibuat otomatis saat dipakai.
 
 ## Catatan

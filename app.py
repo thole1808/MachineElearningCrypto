@@ -219,6 +219,26 @@ class BotHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def end_headers(self) -> None:
+        request_origin = self.headers.get("Origin", "")
+        allowed_origins = {
+            origin.strip()
+            for origin in os.getenv(
+                "CORS_ORIGINS",
+                "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001",
+            ).split(",")
+            if origin.strip()
+        }
+        if request_origin in allowed_origins:
+            self.send_header("Access-Control-Allow-Origin", request_origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.end_headers()
+
     def do_GET(self) -> None:
         if self.path == "/api/binance/status":
             client = BinanceClient()
