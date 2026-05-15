@@ -19,7 +19,9 @@ ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 DATA_DIR = ROOT / "data"
 MEMORY_FILE = DATA_DIR / "conversations.jsonl"
+TRADE_STATE_FILE = DATA_DIR / "trade_state.json"
 TRADE_MEMORY: dict[str, dict[str, int]] = {}
+SIGNAL_NOTIFY_MEMORY: dict[str, int] = {}
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -30,6 +32,26 @@ def auto_scalping_enabled() -> bool:
     return env_bool("AUTO_SCALPING", "false")
 
 
+def load_trade_memory() -> None:
+    global TRADE_MEMORY
+    if not TRADE_STATE_FILE.exists():
+        return
+    try:
+        payload = json.loads(TRADE_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            TRADE_MEMORY = payload
+    except Exception as error:
+        print(f"[TRADE MEMORY LOAD ERROR] {error}")
+
+
+def save_trade_memory() -> None:
+    try:
+        DATA_DIR.mkdir(exist_ok=True)
+        TRADE_STATE_FILE.write_text(json.dumps(TRADE_MEMORY, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as error:
+        print(f"[TRADE MEMORY SAVE ERROR] {error}")
+
+
 def can_auto_enter(symbol: str) -> tuple[bool, str]:
     clean_symbol = normalize_symbol(symbol)
     now = int(time.time())
@@ -38,6 +60,7 @@ def can_auto_enter(symbol: str) -> tuple[bool, str]:
     if memory.get("date") != today:
         memory["date"] = today
         memory["count"] = 0
+        memory["last_entry"] = 0
     cooldown_seconds = int(os.getenv("ENTRY_COOLDOWN_SECONDS", "900"))
     if now - int(memory.get("last_entry", 0)) < cooldown_seconds:
         left = cooldown_seconds - (now - int(memory.get("last_entry", 0)))
@@ -55,8 +78,10 @@ def record_auto_entry(symbol: str) -> None:
     if memory.get("date") != today:
         memory["date"] = today
         memory["count"] = 0
+        memory["last_entry"] = 0
     memory["last_entry"] = int(time.time())
     memory["count"] = int(memory.get("count", 0)) + 1
+    save_trade_memory()
 
 
 def score_trigger_ok(signal_info: dict) -> tuple[bool, str]:
@@ -65,6 +90,8 @@ def score_trigger_ok(signal_info: dict) -> tuple[bool, str]:
     side = signal_info.get("signal")
     if side not in {"BUY", "SELL"}:
         return False, "NO SIGNAL"
+    if side == "SELL" and not env_bool("ALLOW_SHORT", "true"):
+        return False, "ALLOW_SHORT=false"
     threshold = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "6"))
     min_edge = int(os.getenv("SIGNAL_SCORE_MIN_EDGE", "2"))
     buy_score = int(signal_info.get("score_buy", 0))
@@ -80,6 +107,90 @@ def score_trigger_ok(signal_info: dict) -> tuple[bool, str]:
         if sell_score - buy_score < min_edge:
             return False, f"SELL edge {sell_score - buy_score} < {min_edge}"
     return True, f"{side} score trigger valid"
+
+
+def telegram_chat_id(token: str) -> str:
+    configured = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if configured:
+        return configured
+    try:
+        delete_request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/deleteWebhook?drop_pending_updates=false",
+            method="POST",
+        )
+        with urllib.request.urlopen(delete_request, timeout=10) as response:
+            response.read()
+    except Exception as error:
+        print(f"[TELEGRAM DELETE WEBHOOK ERROR] {error}")
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        for item in reversed(payload.get("result", [])):
+            message = item.get("message") or item.get("channel_post") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            if chat_id:
+                return str(chat_id)
+    except Exception as error:
+        print(f"[TELEGRAM CHAT ID ERROR] {error}")
+    return ""
+
+
+def send_telegram(message: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token or not env_bool("TELEGRAM_ENABLED", "false"):
+        return
+    chat_id = telegram_chat_id(token)
+    if not chat_id:
+        print("[TELEGRAM SKIP] TELEGRAM_CHAT_ID kosong. Kirim /start ke bot lalu restart.")
+        return
+    data = urllib.parse.urlencode(
+        {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=data,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+    except Exception as error:
+        print(f"[TELEGRAM ERROR] {error}")
+
+
+def telegram_signal_message(signal_info: dict) -> str:
+    side = signal_info.get("signal") or "NO SIGNAL"
+    score = signal_info.get("score_buy") if side == "BUY" else signal_info.get("score_sell")
+    return (
+        f"<b>AI Signal {side}</b>\n"
+        f"Pair: <b>{signal_info.get('symbol')}</b>\n"
+        f"Price: <b>{signal_info.get('close')}</b>\n"
+        f"RSI: {signal_info.get('rsi')} | Score: {score}/{os.getenv('SIGNAL_SCORE_THRESHOLD', '6')}\n"
+        f"Reason: {signal_info.get('reason')}"
+    )
+
+
+def notify_signal_once(signal_info: dict) -> None:
+    if not env_bool("TELEGRAM_NOTIFY_SIGNALS", "true"):
+        return
+    side = signal_info.get("signal")
+    symbol = str(signal_info.get("symbol", ""))
+    if side not in {"BUY", "SELL"} or not symbol:
+        return
+    key = f"{symbol}:{side}"
+    now = int(time.time())
+    cooldown = int(os.getenv("TELEGRAM_SIGNAL_COOLDOWN_SECONDS", "300"))
+    if now - SIGNAL_NOTIFY_MEMORY.get(key, 0) < cooldown:
+        return
+    SIGNAL_NOTIFY_MEMORY[key] = now
+    send_telegram(telegram_signal_message(signal_info))
 
 
 def normalize_symbol(symbol: str | None, fallback: str = "XAUUSDT") -> str:
@@ -1028,6 +1139,12 @@ def auto_scalping_loop() -> None:
                         )
                         close_result = close_client.close_position_amount(position_amount)
                         print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
+                        send_telegram(
+                            f"<b>FORCE CLOSE {close_reason}</b>\n"
+                            f"{position_symbol} {side_label}\n"
+                            f"PnL: {pnl_percent}% | Pips: {price_move}\n"
+                            f"Result: {json.dumps(close_result, ensure_ascii=False)}"
+                        )
                         open_count = max(0, open_count - 1)
 
                 except Exception as close_error:
@@ -1047,6 +1164,7 @@ def auto_scalping_loop() -> None:
                     if not trigger_ok:
                         print(f"[SKIP] {symbol} {trigger_reason}.")
                         continue
+                    notify_signal_once(signal_info)
                     can_enter, enter_reason = can_auto_enter(symbol)
                     if not can_enter:
                         print(f"[SKIP] {symbol} {enter_reason}.")
@@ -1067,6 +1185,13 @@ def auto_scalping_loop() -> None:
                     print(f"[AUTO ENTRY] {payload}")
                     result = client.handle_webhook_signal(payload)
                     print("[AUTO RESULT]", json.dumps(result, ensure_ascii=False))
+                    send_telegram(
+                        f"<b>AUTO RESULT</b>\n"
+                        f"{symbol} {signal_info['signal']}\n"
+                        f"Accepted: {result.get('accepted')}\n"
+                        f"Reason: {result.get('reason', '-')}\n"
+                        f"Qty: {result.get('quantity', '-')}"
+                    )
                     if result.get("accepted"):
                         record_auto_entry(symbol)
                         open_count += 1

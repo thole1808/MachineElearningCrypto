@@ -79,6 +79,11 @@ type AutoSignal = {
   ema_fast: string;
   ema_slow: string;
   rsi: string;
+  score_buy?: number;
+  score_sell?: number;
+  trend_interval?: string;
+  trend_rsi?: string;
+  atr?: string;
 };
 
 type AutoSignalResponse = {
@@ -126,6 +131,14 @@ function formatPercent(value?: string) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}%`;
+}
+
+function aiDirection(signal?: AutoSignal | null) {
+  const buyScore = Number(signal?.score_buy ?? 0);
+  const sellScore = Number(signal?.score_sell ?? 0);
+  if (buyScore > sellScore) return "naik";
+  if (sellScore > buyScore) return "turun";
+  return "netral";
 }
 
 function formatUsd(value?: string) {
@@ -271,6 +284,22 @@ export default function Home() {
     return formatUsd(usdtValue);
   }, [showIdr, hideBalance]);
   const idrRate = Number(balanceSummary?.usdt_idr_rate || 0);
+  const aiScoreMax = Number(process.env.NEXT_PUBLIC_SIGNAL_SCORE_MAX || 6);
+  const activeScore = Math.max(Number(autoSignal?.score_buy ?? 0), Number(autoSignal?.score_sell ?? 0));
+  const aiConfidence = Math.max(0, Math.min(100, Math.round((activeScore / aiScoreMax) * 100)));
+  const aiScoreBars = `${"█".repeat(Math.round(aiConfidence / 10)).padEnd(10, "░")}`;
+  const marketDirection = aiDirection(autoSignal);
+  const closePrice = Number(autoSignal?.close || status?.price?.price || 0);
+  const tpPips = 35;
+  const slPips = 25;
+  const pipSize = 0.01;
+  const tpDistance = tpPips * pipSize;
+  const slDistance = slPips * pipSize;
+  const targetPrice = autoSignal?.signal === "SELL" ? closePrice - tpDistance : closePrice + tpDistance;
+  const stopPrice = autoSignal?.signal === "SELL" ? closePrice + slDistance : closePrice - slDistance;
+  const aiAdvice = autoSignal?.signal
+    ? `Sinyal ${autoSignal.signal} terdeteksi, tapi eksekusi live tetap mengikuti AUTO_TRADE_ENABLED dan limit risiko.`
+    : "Sinyal belum cukup kuat untuk entry. Tunggu score memenuhi threshold dan hindari entry manual.";
 
   const formatAnySignedUsd = useCallback((value?: string) => {
     if (!value) return "-";
@@ -468,6 +497,45 @@ export default function Home() {
             </div>
           </header>
           {signalError ? <div className="alert compact">{signalError}</div> : null}
+          <div className="ai-report">
+            <div className="ai-report-head">
+              <div>
+                <span>Update Pasar</span>
+                <strong>{autoSignal?.symbol || selectedSymbol}</strong>
+              </div>
+              <div>
+                <span>Harga Sekarang</span>
+                <strong>{formatPrice(autoSignal?.close || status?.price?.price)}</strong>
+              </div>
+            </div>
+
+            <div className="ai-report-body">
+              <section>
+                <span>Situasi Saat Ini</span>
+                <p>
+                  Harga {autoSignal?.symbol || selectedSymbol} terbaca dalam bias {marketDirection}. Confidence AI {aiConfidence}% dengan score {activeScore}/{aiScoreMax}.
+                </p>
+              </section>
+              <section>
+                <span>Target & Proteksi</span>
+                <div className="ai-levels">
+                  <div><small>Target TP</small><strong>{closePrice ? formatPrice(String(targetPrice)) : "-"}</strong></div>
+                  <div><small>Stop</small><strong>{closePrice ? formatPrice(String(stopPrice)) : "-"}</strong></div>
+                  <div><small>TP/SL</small><strong>{tpPips}/{slPips} pips</strong></div>
+                </div>
+              </section>
+              <section>
+                <span>Saran AI</span>
+                <p>{aiAdvice}</p>
+              </section>
+            </div>
+
+            <div className="ai-score">
+              <span className="score-bars">{aiScoreBars}</span>
+              <strong>{activeScore}/{aiScoreMax}</strong>
+              <span>{autoSignal?.trend_interval || "5m"} trend RSI {autoSignal?.trend_rsi || "-"}</span>
+            </div>
+          </div>
           <div className="signal-grid">
             <div>
               <span>Pair</span>
