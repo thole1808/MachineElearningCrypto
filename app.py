@@ -1452,6 +1452,10 @@ class BotHandler(SimpleHTTPRequestHandler):
             if not side:
                 self.send_json({"ok": False, "error": signal_info.get("reason", "NO SIGNAL"), "signal": signal_info}, status=400)
                 return
+            trigger_ok, trigger_reason = score_trigger_ok(signal_info)
+            if not trigger_ok:
+                self.send_json({"ok": False, "error": trigger_reason, "signal": signal_info}, status=400)
+                return
             client = BinanceClient(symbol=symbol)
             payload = {
                 "symbol": symbol,

@@ -4,6 +4,46 @@ const botApiUrl = process.env.BOT_API_URL?.replace(/\/$/, "") || "http://127.0.0
 
 export async function GET(request: NextRequest) {
   const symbol = request.nextUrl.searchParams.get("symbol") || "";
+  const symbols = request.nextUrl.searchParams.get("symbols") || "";
+
+  if (symbols) {
+    const symbolList = symbols
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean);
+
+    try {
+      const signals = await Promise.all(
+        symbolList.map(async (item) => {
+          const query = new URLSearchParams({ symbol: item });
+          const response = await fetch(`${botApiUrl}/api/auto-signal?${query.toString()}`, {
+            cache: "no-store",
+          });
+          const body = await response.json();
+          if (!response.ok || !body.ok) {
+            return { symbol: item, ok: false, error: body.error || "Gagal membaca signal." };
+          }
+          return { ok: true, signal: body.signal };
+        }),
+      );
+
+      return NextResponse.json({ ok: true, signals });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Backend Python belum berjalan atau tidak bisa dihubungi.";
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `Backend belum aktif di ${botApiUrl}. Jalankan ./start-web.sh dari root project. Detail: ${message}`,
+        },
+        { status: 502 },
+      );
+    }
+  }
+
   const query = new URLSearchParams();
   if (symbol) query.set("symbol", symbol);
 

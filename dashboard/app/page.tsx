@@ -86,34 +86,28 @@ type AutoSignal = {
   atr?: string;
 };
 
-type AutoSignalResponse = {
+type MultiSignalItem = {
   ok: boolean;
   signal?: AutoSignal;
-  error?: string;
-};
-
-type BotPnlState = {
-  total_pnl_usdt?: string;
-  today_pnl_usdt?: string;
-  total_wins?: number;
-  total_losses?: number;
-  today_wins?: number;
-  today_losses?: number;
-  total_trades?: number;
-  last_trade_at?: string;
-};
-
-type BotPnlResponse = {
-  ok: boolean;
   symbol?: string;
-  summary?: string;
-  state?: BotPnlState;
-  usdt_idr_rate?: string;
   error?: string;
 };
 
-const defaultSymbol = "XAUUSDT";
-const realtimeRefreshMs = 2000;
+type MultiSignalResponse = {
+  ok: boolean;
+  signals?: MultiSignalItem[];
+  error?: string;
+};
+
+const signalSymbols = (
+  process.env.NEXT_PUBLIC_SIGNAL_SYMBOLS ||
+  "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,INJUSDT,NEARUSDT,ONDOUSDT,ENAUSDT,HYPEUSDT,1000PEPEUSDT,XAUUSDT"
+)
+  .split(",")
+  .map((symbol) => symbol.trim().toUpperCase())
+  .filter(Boolean);
+const defaultSymbol = signalSymbols[0] || "BTCUSDT";
+const realtimeRefreshMs = 10000;
 type BalanceCurrency = "USDT" | "IDR";
 
 const subscribeHydration = () => () => undefined;
@@ -153,12 +147,8 @@ function formatPercent(value?: string) {
   })}%`;
 }
 
-function aiDirection(signal?: AutoSignal | null) {
-  const buyScore = Number(signal?.score_buy ?? 0);
-  const sellScore = Number(signal?.score_sell ?? 0);
-  if (buyScore > sellScore) return "naik";
-  if (sellScore > buyScore) return "turun";
-  return "netral";
+function signalScore(signal?: AutoSignal | null) {
+  return Math.max(Number(signal?.score_buy ?? 0), Number(signal?.score_sell ?? 0));
 }
 
 function formatUsd(value?: string) {
@@ -175,19 +165,6 @@ function formatIdr(value?: string) {
     currency: "IDR",
     maximumFractionDigits: 0,
   });
-}
-
-function formatSignedIdr(value?: string) {
-  if (!value) return "-";
-  const number = Number(value);
-  const formatted = Math.round(Math.abs(number)).toLocaleString("id-ID", {
-    style: "currency",
-    currency: "IDR",
-    maximumFractionDigits: 0,
-  });
-  if (number > 0) return `+${formatted}`;
-  if (number < 0) return `-${formatted}`;
-  return formatted;
 }
 
 function roundedNumber(value?: string) {
@@ -213,9 +190,10 @@ export default function Home() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
-  const [botPnl, setBotPnl] = useState<BotPnlResponse | null>(null);
-  const [botPnlError, setBotPnlError] = useState("");
+  const [autoSignals, setAutoSignals] = useState<AutoSignal[]>([]);
   const [hideBalance, setHideBalance] = useState(false);
+  const [tradeLoadingSymbol, setTradeLoadingSymbol] = useState("");
+  const [tradeMessage, setTradeMessage] = useState("");
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -257,51 +235,70 @@ export default function Home() {
 
   const loadAutoSignal = useCallback(async () => {
     try {
-      const response = await fetch(`/api/auto-signal?symbol=${selectedSymbol}`);
-      const body = (await response.json()) as AutoSignalResponse;
-      if (!response.ok || !body.ok || !body.signal) {
+      const response = await fetch(`/api/auto-signal?symbols=${signalSymbols.join(",")}`);
+      const body = (await response.json()) as MultiSignalResponse;
+      if (!response.ok || !body.ok || !body.signals) {
         throw new Error(body.error || "Backend belum bisa membaca signal Binance.");
       }
-      setAutoSignal(body.signal);
+      const signals = body.signals
+        .map((item) => item.signal)
+        .filter((item): item is AutoSignal => Boolean(item))
+        .sort((left, right) => signalScore(right) - signalScore(left));
+      setAutoSignals(signals);
+      setAutoSignal(signals.find((item) => item.symbol === selectedSymbol) || signals[0] || null);
       setSignalError("");
     } catch (caught) {
       setSignalError(caught instanceof Error ? caught.message : "Terjadi error saat membaca signal.");
     }
   }, [selectedSymbol]);
 
-  const loadBotPnl = useCallback(async () => {
+  const executeSignal = useCallback(async (signal: AutoSignal) => {
+    if (!signal.signal) return;
+    const confirmed = window.confirm(`Kirim order ${signal.signal} untuk ${signal.symbol}?`);
+    if (!confirmed) return;
+    setTradeLoadingSymbol(signal.symbol);
+    setTradeMessage("");
     try {
-      const response = await fetch(`/api/bot/pnl?symbol=${selectedSymbol}`);
-      const body = (await response.json()) as BotPnlResponse;
+      const response = await fetch("/api/auto-signal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: signal.symbol,
+          usdt: process.env.NEXT_PUBLIC_ORDER_USDT || "5",
+          leverage: process.env.NEXT_PUBLIC_DEFAULT_LEVERAGE || "5",
+        }),
+      });
+      const body = await response.json();
       if (!response.ok || !body.ok) {
-        throw new Error(body.error || "Backend belum bisa membaca P&L bot.");
+        throw new Error(body.error || body.result?.reason || "Order gagal dikirim.");
       }
-      setBotPnl(body);
-      setBotPnlError("");
+      const result = body.result;
+      setTradeMessage(result?.accepted ? `${signal.symbol} ${signal.signal} terkirim.` : `${signal.symbol}: ${result?.reason || "Order tidak diterima."}`);
+      checkBinance();
     } catch (caught) {
-      setBotPnlError(caught instanceof Error ? caught.message : "Terjadi error saat membaca P&L bot.");
+      setTradeMessage(caught instanceof Error ? caught.message : "Terjadi error saat kirim order.");
+    } finally {
+      setTradeLoadingSymbol("");
     }
-  }, [selectedSymbol]);
+  }, [checkBinance]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
       loadAutoSignal();
-      loadBotPnl();
     }, realtimeRefreshMs);
 
     return () => window.clearInterval(timer);
-  }, [checkBinance, loadAutoSignal, loadBotPnl]);
+  }, [checkBinance, loadAutoSignal]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
       loadAutoSignal();
-      loadBotPnl();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadAutoSignal, loadBotPnl]);
+  }, [checkBinance, loadAutoSignal]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -336,27 +333,9 @@ export default function Home() {
   }, [showIdr, hideBalance]);
   const idrRate = Number(balanceSummary?.usdt_idr_rate || 0);
   const aiScoreMax = Number(process.env.NEXT_PUBLIC_SIGNAL_SCORE_MAX || 6);
-  const activeScore = Math.max(Number(autoSignal?.score_buy ?? 0), Number(autoSignal?.score_sell ?? 0));
-  const aiConfidence = Math.max(0, Math.min(100, Math.round((activeScore / aiScoreMax) * 100)));
-  const aiScoreBars = `${"█".repeat(Math.round(aiConfidence / 10)).padEnd(10, "░")}`;
-  const marketDirection = aiDirection(autoSignal);
-  const closePrice = Number(autoSignal?.close || status?.price?.price || 0);
-  const tpPips = 35;
-  const slPips = 25;
-  const pipSize = 0.01;
-  const tpDistance = tpPips * pipSize;
-  const slDistance = slPips * pipSize;
-  const targetPrice = autoSignal?.signal === "SELL" ? closePrice - tpDistance : closePrice + tpDistance;
-  const stopPrice = autoSignal?.signal === "SELL" ? closePrice + slDistance : closePrice - slDistance;
-  const aiAdvice = autoSignal?.signal
-    ? `Sinyal ${autoSignal.signal} terdeteksi, tapi eksekusi live tetap mengikuti AUTO_TRADE_ENABLED dan limit risiko.`
-    : "Sinyal belum cukup kuat untuk entry. Tunggu score memenuhi threshold dan hindari entry manual.";
-  const botPnlState = botPnl?.state || {};
-  const botTodayPnlUsdt = botPnlState.today_pnl_usdt || "0";
-  const botTotalPnlUsdt = botPnlState.total_pnl_usdt || "0";
-  const botPnlRate = Number(botPnl?.usdt_idr_rate || balanceSummary?.usdt_idr_rate || 0);
-  const botTodayPnlIdr = botPnlRate ? String(Number(botTodayPnlUsdt) * botPnlRate) : "0";
-  const botTotalPnlIdr = botPnlRate ? String(Number(botTotalPnlUsdt) * botPnlRate) : "0";
+  const strongSignalThreshold = Number(process.env.NEXT_PUBLIC_STRONG_SIGNAL_THRESHOLD || aiScoreMax);
+  const activeSignalCards = autoSignals.filter((signal) => Boolean(signal.signal));
+  const watchSignals = autoSignals.slice(0, 8);
 
   const formatAnySignedUsd = useCallback((value?: string) => {
     if (!value) return "-";
@@ -545,100 +524,65 @@ export default function Home() {
           <header className="panel-head">
             <div>
               <h2>Signal</h2>
-              <p>Pair aktif refresh tiap {realtimeRefreshMs / 1000} detik.</p>
+              <p>Scan {signalSymbols.length} pair, refresh tiap {realtimeRefreshMs / 1000} detik.</p>
             </div>
             <div className="signal-actions">
-              <strong className={autoSignal?.signal === "BUY" ? "signal-badge buy" : autoSignal?.signal === "SELL" ? "signal-badge sell" : "signal-badge"}>
-                {autoSignal?.signal || "NO SIGNAL"}
+              <strong className={activeSignalCards.length ? "signal-badge buy" : "signal-badge"}>
+                {activeSignalCards.length ? `${activeSignalCards.length} SIGNAL` : "NO SIGNAL"}
               </strong>
             </div>
           </header>
           {signalError ? <div className="alert compact">{signalError}</div> : null}
-          <div className="ai-report">
-            <div className="ai-report-head">
-              <div>
-                <span>Update Pasar</span>
-                <strong>{autoSignal?.symbol || selectedSymbol}</strong>
+          {tradeMessage ? <div className="alert compact">{tradeMessage}</div> : null}
+          <div className="multi-signal-grid">
+            {activeSignalCards.length ? (
+              activeSignalCards.map((signal) => {
+                const score = signalScore(signal);
+                const confidence = Math.max(0, Math.min(100, Math.round((score / aiScoreMax) * 100)));
+                const isTrading = tradeLoadingSymbol === signal.symbol;
+                const isStrongSignal = score >= strongSignalThreshold;
+                return (
+                  <article className={`signal-card ${signal.signal === "BUY" ? "buy" : "sell"}`} key={signal.symbol}>
+                    <div className="signal-card-head">
+                      <strong>{signal.symbol}</strong>
+                      <span>{signal.signal}</span>
+                    </div>
+                    <div className="signal-card-price">{formatPrice(signal.close)}</div>
+                    <div className="signal-card-meta">
+                      <span>Score {score}/{aiScoreMax}</span>
+                      <span>AI {confidence}%</span>
+                      <span>RSI {signal.rsi}</span>
+                    </div>
+                    <p>{signal.reason}</p>
+                    <button
+                      className={`signal-trade-button ${signal.signal === "BUY" ? "buy" : "sell"}`}
+                      disabled={isTrading || !isStrongSignal}
+                      type="button"
+                      onClick={() => executeSignal(signal)}
+                    >
+                      {isTrading ? "Sending" : isStrongSignal ? `Entry ${signal.signal}` : `Wait Strong ${score}/${strongSignalThreshold}`}
+                    </button>
+                  </article>
+                );
+              })
+            ) : (
+              <div className="scan-strip">
+                {watchSignals.map((signal) => (
+                  <button
+                    className={signal.symbol === autoSignal?.symbol ? "active" : ""}
+                    key={signal.symbol}
+                    type="button"
+                    onClick={() => {
+                      setAutoSignal(signal);
+                      setSelectedSymbol(signal.symbol);
+                    }}
+                  >
+                    <strong>{signal.symbol}</strong>
+                    <span>{signalScore(signal)}/{aiScoreMax}</span>
+                  </button>
+                ))}
               </div>
-              <div>
-                <span>Harga Sekarang</span>
-                <strong>{formatPrice(autoSignal?.close || status?.price?.price)}</strong>
-              </div>
-            </div>
-
-            <div className="ai-report-body">
-              <section>
-                <span>Situasi Saat Ini</span>
-                <p>
-                  Harga {autoSignal?.symbol || selectedSymbol} terbaca dalam bias {marketDirection}. Confidence AI {aiConfidence}% dengan score {activeScore}/{aiScoreMax}.
-                </p>
-              </section>
-              <section>
-                <span>Target & Proteksi</span>
-                <div className="ai-levels">
-                  <div><small>Target TP</small><strong>{closePrice ? formatPrice(String(targetPrice)) : "-"}</strong></div>
-                  <div><small>Stop</small><strong>{closePrice ? formatPrice(String(stopPrice)) : "-"}</strong></div>
-                  <div><small>TP/SL</small><strong>{tpPips}/{slPips} pips</strong></div>
-                </div>
-              </section>
-              <section>
-                <span>Saran AI</span>
-                <p>{aiAdvice}</p>
-              </section>
-              <section>
-                <span>P&L Bot</span>
-                {botPnlError ? <div className="alert compact">{botPnlError}</div> : null}
-                <div className="ai-levels bot-pnl-levels">
-                  <div>
-                    <small>Hari Ini</small>
-                    <strong className={toneClass(botTodayPnlUsdt)}>{hideBalance ? "***" : formatSignedUsd(botTodayPnlUsdt)}</strong>
-                    <small>{hideBalance ? "***" : formatSignedIdr(botTodayPnlIdr)}</small>
-                  </div>
-                  <div>
-                    <small>Total Bot</small>
-                    <strong className={toneClass(botTotalPnlUsdt)}>{hideBalance ? "***" : formatSignedUsd(botTotalPnlUsdt)}</strong>
-                    <small>{hideBalance ? "***" : formatSignedIdr(botTotalPnlIdr)}</small>
-                  </div>
-                  <div>
-                    <small>Win/Loss Hari Ini</small>
-                    <strong>{botPnlState.today_wins ?? 0}/{botPnlState.today_losses ?? 0}</strong>
-                    <small>Total trade {botPnlState.total_trades ?? 0}</small>
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            <div className="ai-score">
-              <span className="score-bars">{aiScoreBars}</span>
-              <strong>{activeScore}/{aiScoreMax}</strong>
-              <span>{autoSignal?.trend_interval || "5m"} trend RSI {autoSignal?.trend_rsi || "-"}</span>
-            </div>
-          </div>
-          <div className="signal-grid">
-            <div>
-              <span>Pair</span>
-              <strong>{autoSignal?.symbol || selectedSymbol}</strong>
-            </div>
-            <div>
-              <span>RSI</span>
-              <strong>{autoSignal?.rsi || "-"}</strong>
-            </div>
-            <div>
-              <span>EMA Fast</span>
-              <strong>{formatPrice(autoSignal?.ema_fast)}</strong>
-            </div>
-            <div>
-              <span>EMA Slow</span>
-              <strong>{formatPrice(autoSignal?.ema_slow)}</strong>
-            </div>
-            <div>
-              <span>Close</span>
-              <strong>{formatPrice(autoSignal?.close)}</strong>
-            </div>
-            <div className="signal-reason">
-              <span>Reason</span>
-              <strong>{autoSignal?.reason || "-"}</strong>
-            </div>
+            )}
           </div>
         </section>
       </section>
