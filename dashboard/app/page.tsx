@@ -99,6 +99,18 @@ type MultiSignalResponse = {
   error?: string;
 };
 
+type TradingControl = {
+  auto_trade_enabled: boolean;
+  auto_scalping: boolean;
+  dry_run: boolean;
+};
+
+type TradingControlResponse = {
+  ok: boolean;
+  control?: TradingControl;
+  error?: string;
+};
+
 const signalSymbols = (
   process.env.NEXT_PUBLIC_SIGNAL_SYMBOLS ||
   "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,INJUSDT,NEARUSDT,ONDOUSDT,ENAUSDT,HYPEUSDT,1000PEPEUSDT,XAUUSDT"
@@ -194,6 +206,11 @@ export default function Home() {
   const [hideBalance, setHideBalance] = useState(false);
   const [tradeLoadingSymbol, setTradeLoadingSymbol] = useState("");
   const [tradeMessage, setTradeMessage] = useState("");
+  const [tradingControl, setTradingControl] = useState<TradingControl | null>(null);
+  const [controlLoading, setControlLoading] = useState(false);
+  const [controlError, setControlError] = useState("");
+  const [tpLoadingSymbol, setTpLoadingSymbol] = useState("");
+  const [positionMessage, setPositionMessage] = useState("");
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -252,6 +269,69 @@ export default function Home() {
     }
   }, [selectedSymbol]);
 
+  const loadTradingControl = useCallback(async () => {
+    try {
+      const response = await fetch("/api/trading-control");
+      const body = (await response.json()) as TradingControlResponse;
+      if (!response.ok || !body.ok || !body.control) {
+        throw new Error(body.error || "Backend belum bisa membaca kontrol trading.");
+      }
+      setTradingControl(body.control);
+      setControlError("");
+    } catch (caught) {
+      setControlError(caught instanceof Error ? caught.message : "Terjadi error saat membaca kontrol trading.");
+    }
+  }, []);
+
+  const toggleTrading = useCallback(async () => {
+    const nextEnabled = !tradingControl?.auto_trade_enabled;
+    setControlLoading(true);
+    setControlError("");
+    try {
+      const response = await fetch("/api/trading-control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto_trade_enabled: nextEnabled }),
+      });
+      const body = (await response.json()) as TradingControlResponse;
+      if (!response.ok || !body.ok || !body.control) {
+        throw new Error(body.error || "Gagal mengubah kontrol trading.");
+      }
+      setTradingControl(body.control);
+      setTradeMessage(nextEnabled ? "Trading enabled. Bot boleh entry lagi." : "Trading disabled. Entry baru dipause.");
+    } catch (caught) {
+      setControlError(caught instanceof Error ? caught.message : "Terjadi error saat mengubah kontrol trading.");
+    } finally {
+      setControlLoading(false);
+    }
+  }, [tradingControl]);
+
+  const takeProfitNow = useCallback(async (position: OpenPosition) => {
+    const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
+    if (Number(pnlValue) <= 0) return;
+    const confirmed = window.confirm(`Close profit ${position.symbol} sekarang?`);
+    if (!confirmed) return;
+    setTpLoadingSymbol(position.symbol);
+    setPositionMessage("");
+    try {
+      const response = await fetch("/api/position/take-profit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: position.symbol }),
+      });
+      const body = await response.json();
+      if (!response.ok || !body.ok) {
+        throw new Error(body.error || "Gagal close profit.");
+      }
+      setPositionMessage(`${position.symbol} closed profit: ${body.pnl_usdt} USDT.`);
+      checkBinance();
+    } catch (caught) {
+      setPositionMessage(caught instanceof Error ? caught.message : "Terjadi error saat close profit.");
+    } finally {
+      setTpLoadingSymbol("");
+    }
+  }, [checkBinance]);
+
   const executeSignal = useCallback(async (signal: AutoSignal) => {
     if (!signal.signal) return;
     const confirmed = window.confirm(`Kirim order ${signal.signal} untuk ${signal.symbol}?`);
@@ -286,19 +366,21 @@ export default function Home() {
     const timer = window.setInterval(() => {
       checkBinance();
       loadAutoSignal();
+      loadTradingControl();
     }, realtimeRefreshMs);
 
     return () => window.clearInterval(timer);
-  }, [checkBinance, loadAutoSignal]);
+  }, [checkBinance, loadAutoSignal, loadTradingControl]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
       loadAutoSignal();
+      loadTradingControl();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadAutoSignal]);
+  }, [checkBinance, loadAutoSignal, loadTradingControl]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -373,6 +455,16 @@ export default function Home() {
           <span className={status?.has_keys ? "status-pill live" : "status-pill danger"}>
             {status?.has_keys ? "Binance Live" : "Disconnected"}
           </span>
+          <button
+            className={tradingControl?.auto_trade_enabled ? "trade-toggle on" : "trade-toggle off"}
+            disabled={controlLoading}
+            type="button"
+            onClick={toggleTrading}
+            title="Pause atau aktifkan entry baru dari bot"
+          >
+            <span>{tradingControl?.auto_trade_enabled ? "Trading ON" : "Trading OFF"}</span>
+            <strong>{controlLoading ? "..." : tradingControl?.auto_trade_enabled ? "Enabled" : "Disabled"}</strong>
+          </button>
           <span className="status-pill">Update {lastUpdated}</span>
           <button className="primary" disabled={loading} onClick={() => checkBinance(true)}>
             {loading ? "Syncing" : "Refresh"}
@@ -381,6 +473,7 @@ export default function Home() {
       </header>
 
       {error ? <section className="alert">{error}</section> : null}
+      {controlError ? <section className="alert">{controlError}</section> : null}
       {!error && setupMessages.length ? (
         <section className="alert">
           <strong>Setup belum lengkap</strong>
@@ -423,6 +516,7 @@ export default function Home() {
               <p>Entry, mark, target TP/SL, ROE, dan liquidation realtime.</p>
             </div>
           </header>
+          {positionMessage ? <div className="alert compact">{positionMessage}</div> : null}
           {openPositions.length ? (
             <div className="positions-table">
               <div className="positions-row positions-head">
@@ -436,11 +530,13 @@ export default function Home() {
                 <span>TP</span>
                 <span>SL</span>
                 <span>Liq.</span>
+                <span>Action</span>
               </div>
               {openPositions.map((position) => {
                 const amount = Number(position.positionAmt);
                 const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
                 const pnl = Number(pnlValue);
+                const isTpLoading = tpLoadingSymbol === position.symbol;
                 return (
                   <div className="positions-row" key={position.symbol}>
                     <strong>{position.symbol}</strong>
@@ -453,6 +549,14 @@ export default function Home() {
                     <span>{formatPrice(position.takeProfitPrice)}</span>
                     <span>{formatPrice(position.stopLossPrice)}</span>
                     <span>{formatPrice(position.liquidationPrice)}</span>
+                    <button
+                      className="tp-now-button"
+                      disabled={pnl <= 0 || isTpLoading}
+                      type="button"
+                      onClick={() => takeProfitNow(position)}
+                    >
+                      {isTpLoading ? "Closing" : pnl > 0 ? "TP Now" : "Wait Profit"}
+                    </button>
                   </div>
                 );
               })}

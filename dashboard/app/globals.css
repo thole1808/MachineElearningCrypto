@@ -133,6 +133,56 @@ h2 {
   box-shadow: 0 0 10px var(--red-glow);
 }
 
+.trade-toggle {
+  min-height: 44px;
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 7px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #f8fafc;
+  text-align: left;
+}
+
+.trade-toggle span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.trade-toggle strong {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.trade-toggle.on {
+  border-color: rgba(16, 185, 129, 0.55);
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.trade-toggle.on strong {
+  color: #34d399;
+}
+
+.trade-toggle.off {
+  border-color: rgba(239, 68, 68, 0.55);
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.trade-toggle.off strong {
+  color: #f87171;
+}
+
+.trade-toggle:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .primary {
   min-width: 100px;
   min-height: 38px;
@@ -304,8 +354,8 @@ h2 {
 
 .positions-row {
   display: grid;
-  grid-template-columns: 120px 80px 100px 110px 110px 120px 80px 110px 110px 110px;
-  min-width: 1050px;
+  grid-template-columns: 120px 80px 100px 110px 110px 120px 80px 110px 110px 110px 120px;
+  min-width: 1180px;
   align-items: center;
   gap: 12px;
   padding: 16px;
@@ -334,6 +384,24 @@ h2 {
 .balance-row span,
 .balance-row strong {
   overflow-wrap: anywhere;
+}
+
+.tp-now-button {
+  min-height: 36px;
+  border: 1px solid rgba(16, 185, 129, 0.55);
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.tp-now-button:disabled {
+  cursor: not-allowed;
+  border-color: var(--line);
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--muted);
+  opacity: 0.75;
 }
 
 .signal-panel {

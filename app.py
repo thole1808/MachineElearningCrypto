@@ -32,6 +32,38 @@ def auto_scalping_enabled() -> bool:
     return env_bool("AUTO_SCALPING", "false")
 
 
+def write_env_value(key: str, value: str) -> None:
+    env_file = ROOT / ".env"
+    line = f"{key}={value}"
+    if not env_file.exists():
+        env_file.write_text(line + "\n", encoding="utf-8")
+        os.environ[key] = value
+        return
+
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    updated = False
+    result: list[str] = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if stripped and not stripped.startswith("#") and stripped.split("=", 1)[0].strip() == key:
+            result.append(line)
+            updated = True
+        else:
+            result.append(raw_line)
+    if not updated:
+        result.append(line)
+    env_file.write_text("\n".join(result) + "\n", encoding="utf-8")
+    os.environ[key] = value
+
+
+def trading_control_status() -> dict:
+    return {
+        "auto_trade_enabled": env_bool("AUTO_TRADE_ENABLED", "false"),
+        "auto_scalping": auto_scalping_enabled(),
+        "dry_run": env_bool("DRY_RUN", "true"),
+    }
+
+
 def load_trade_memory() -> None:
     global TRADE_MEMORY
     if not TRADE_STATE_FILE.exists():
@@ -1120,16 +1152,18 @@ def auto_scalping_loop() -> None:
 
             # AUTO FORCE CLOSE PROFIT UNTUK SEMUA POSISI TERBUKA
             # Jika mode profit cepat aktif, bot tutup market begitu posisi sudah hijau
-            # sesuai target FORCE_CLOSE_PROFIT_PERCENT.
+            # sesuai target FORCE_CLOSE_PROFIT_USDT / FORCE_CLOSE_PROFIT_PERCENT.
             # Setting dari .env:
             # PROFIT_QUICK_CLOSE=true
             # FORCE_CLOSE_MIN_HOLD_SECONDS=0
-            # FORCE_CLOSE_PROFIT_PERCENT=0.15
+            # FORCE_CLOSE_PROFIT_USDT=3
             quick_profit_close = env_bool("PROFIT_QUICK_CLOSE", "true")
             force_close_loss = env_bool("FORCE_CLOSE_LOSS", "true")
             max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "300"))
             min_profit_hold_seconds = int(os.getenv("FORCE_CLOSE_MIN_HOLD_SECONDS", "0"))
+            force_close_profit_usdt = Decimal(os.getenv("FORCE_CLOSE_PROFIT_USDT", "0"))
             force_close_profit_percent = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PERCENT", "0.15"))
+            force_close_loss_usdt = Decimal(os.getenv("FORCE_CLOSE_LOSS_USDT", "0"))
             force_close_loss_percent = Decimal(os.getenv("FORCE_CLOSE_LOSS_PERCENT", os.getenv("SL_PERCENT", "0.25")))
             force_close_profit_pips = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PIPS", os.getenv("TAKE_PROFIT_PIPS", "50")))
             force_close_loss_pips = Decimal(os.getenv("FORCE_CLOSE_LOSS_PIPS", os.getenv("STOP_LOSS_PIPS", "35")))
@@ -1142,6 +1176,7 @@ def auto_scalping_loop() -> None:
                         continue
 
                     pnl_percent = Decimal(str(position.get("pnlPercent", "0")))
+                    pnl_usdt = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
                     update_time_ms = int(position.get("updateTime", "0") or "0")
                     if update_time_ms > 0:
                         hold_seconds = int(time.time() - (update_time_ms / 1000))
@@ -1159,11 +1194,15 @@ def auto_scalping_loop() -> None:
                             price_move = (entry_price - mark_price) / pip_size
 
                     profit_target_hit = pnl_percent >= force_close_profit_percent
+                    if force_close_profit_usdt > 0:
+                        profit_target_hit = pnl_usdt >= force_close_profit_usdt
                     if force_close_profit_pips > 0:
                         profit_target_hit = price_move >= force_close_profit_pips
                     profit_hold_ok = hold_seconds >= min_profit_hold_seconds
                     time_exit_ok = (not quick_profit_close) and hold_seconds >= max_hold_seconds
                     loss_limit_hit = force_close_loss and pnl_percent <= -force_close_loss_percent
+                    if force_close_loss and force_close_loss_usdt > 0:
+                        loss_limit_hit = pnl_usdt <= -force_close_loss_usdt
                     if force_close_loss and force_close_loss_pips > 0:
                         loss_limit_hit = price_move <= -force_close_loss_pips
 
@@ -1173,14 +1212,14 @@ def auto_scalping_loop() -> None:
                         close_reason = "LOSS" if loss_limit_hit else "PROFIT"
                         print(
                             f"[FORCE CLOSE {close_reason}] {position_symbol} {side_label} "
-                            f"pnl={pnl_percent}% pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
+                            f"pnl={pnl_percent}% usdt={pnl_usdt} pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
                         )
                         close_result = close_client.close_position_amount(position_amount)
                         print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
                         send_telegram(
                             f"<b>FORCE CLOSE {close_reason}</b>\n"
                             f"{position_symbol} {side_label}\n"
-                            f"PnL: {pnl_percent}% | Pips: {price_move}\n"
+                            f"PnL: {pnl_percent}% | {pnl_usdt} USDT | Pips: {price_move}\n"
                             f"Result: {json.dumps(close_result, ensure_ascii=False)}"
                         )
                         open_count = max(0, open_count - 1)
@@ -1358,6 +1397,9 @@ class BotHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/trading-control":
+            self.send_json({"ok": True, "control": trading_control_status()})
+            return
         if parsed.path == "/api/binance/status":
             query = urllib.parse.parse_qs(parsed.query)
             symbol = query.get("symbol", [None])[0]
@@ -1427,6 +1469,61 @@ class BotHandler(SimpleHTTPRequestHandler):
             body = json.loads(raw_body or "{}")
         except json.JSONDecodeError:
             self.send_json({"error": "JSON tidak valid"}, status=400)
+            return
+        if parsed.path == "/api/trading-control":
+            enabled = body.get("auto_trade_enabled")
+            if not isinstance(enabled, bool):
+                self.send_json({"ok": False, "error": "auto_trade_enabled harus boolean."}, status=400)
+                return
+            write_env_value("AUTO_TRADE_ENABLED", "true" if enabled else "false")
+            self.send_json({"ok": True, "control": trading_control_status()})
+            return
+        if parsed.path == "/api/position/take-profit":
+            symbol = normalize_symbol(str(body.get("symbol", "")))
+            if not symbol:
+                self.send_json({"ok": False, "error": "symbol wajib diisi."}, status=400)
+                return
+            client = BinanceClient(symbol=symbol)
+            try:
+                positions = client.open_positions()
+                position = next(
+                    (
+                        item
+                        for item in positions
+                        if str(item.get("symbol", "")).upper() == symbol
+                        and Decimal(str(item.get("positionAmt", "0"))) != 0
+                    ),
+                    None,
+                )
+                if not position:
+                    self.send_json({"ok": False, "error": f"Tidak ada posisi terbuka untuk {symbol}."}, status=404)
+                    return
+                pnl_usdt = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
+                pnl_percent = Decimal(str(position.get("pnlPercent", "0")))
+                if pnl_usdt <= 0:
+                    self.send_json(
+                        {
+                            "ok": False,
+                            "error": f"Posisi {symbol} belum profit. PnL {pnl_usdt} USDT.",
+                            "position": position,
+                        },
+                        status=400,
+                    )
+                    return
+                position_amount = Decimal(str(position.get("positionAmt", "0")))
+                result = client.close_position_amount(position_amount)
+                self.send_json(
+                    {
+                        "ok": True,
+                        "symbol": symbol,
+                        "closed": True,
+                        "pnl_usdt": str(pnl_usdt),
+                        "pnl_percent": str(pnl_percent),
+                        "result": result,
+                    }
+                )
+            except Exception as error:
+                self.send_json({"ok": False, "error": str(error)}, status=400)
             return
         if parsed.path == "/api/tradingview/webhook":
             client = BinanceClient(symbol=str(body.get("symbol", os.getenv("TRADE_SYMBOL", "XAUUSDT"))))
