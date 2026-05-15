@@ -84,6 +84,44 @@ def record_auto_entry(symbol: str) -> None:
     save_trade_memory()
 
 
+def record_trade_pnl(symbol: str, pnl_usdt: Decimal) -> dict:
+    clean_symbol = normalize_symbol(symbol)
+    today = time.strftime("%Y-%m-%d")
+    memory = TRADE_MEMORY.setdefault(clean_symbol, {"last_entry": 0, "date": today, "count": 0})
+    if memory.get("pnl_date") != today:
+        memory["pnl_date"] = today
+        memory["today_pnl_usdt"] = "0"
+        memory["today_wins"] = 0
+        memory["today_losses"] = 0
+    memory["total_pnl_usdt"] = str(Decimal(str(memory.get("total_pnl_usdt", "0"))) + pnl_usdt)
+    memory["today_pnl_usdt"] = str(Decimal(str(memory.get("today_pnl_usdt", "0"))) + pnl_usdt)
+    memory["total_trades"] = int(memory.get("total_trades", 0)) + 1
+    if pnl_usdt >= 0:
+        memory["total_wins"] = int(memory.get("total_wins", 0)) + 1
+        memory["today_wins"] = int(memory.get("today_wins", 0)) + 1
+    else:
+        memory["total_losses"] = int(memory.get("total_losses", 0)) + 1
+        memory["today_losses"] = int(memory.get("today_losses", 0)) + 1
+    save_trade_memory()
+    return memory
+
+
+def trade_pnl_summary(symbol: str, idr_rate: Decimal | None = None) -> str:
+    clean_symbol = normalize_symbol(symbol)
+    today = time.strftime("%Y-%m-%d")
+    memory = TRADE_MEMORY.setdefault(clean_symbol, {"last_entry": 0, "date": today, "count": 0})
+    total_usdt = Decimal(str(memory.get("total_pnl_usdt", "0")))
+    today_usdt = Decimal(str(memory.get("today_pnl_usdt", "0"))) if memory.get("pnl_date") == today else Decimal("0")
+    rate = idr_rate if idr_rate is not None else Decimal("0")
+    total_idr = total_usdt * rate
+    today_idr = today_usdt * rate
+    return (
+        f"P&L Hari ini: {today_usdt:+.4f} USDT / Rp {today_idr:+,.0f}\n"
+        f"P&L Total bot: {total_usdt:+.4f} USDT / Rp {total_idr:+,.0f}\n"
+        f"Win/Loss hari ini: {memory.get('today_wins', 0)}/{memory.get('today_losses', 0)}"
+    )
+
+
 def score_trigger_ok(signal_info: dict) -> tuple[bool, str]:
     if not env_bool("REQUIRE_SCORE_TRIGGER", "true"):
         return True, "score trigger tidak diwajibkan"
@@ -1355,6 +1393,27 @@ class BotHandler(SimpleHTTPRequestHandler):
             symbol = query.get("symbol", [os.getenv("TRADE_SYMBOL", "XAUUSDT")])[0]
             try:
                 self.send_json({"ok": True, "signal": generate_auto_signal(normalize_symbol(symbol))})
+            except Exception as error:
+                self.send_json({"ok": False, "error": str(error)}, status=502)
+            return
+        if parsed.path == "/api/bot/pnl":
+            query = urllib.parse.parse_qs(parsed.query)
+            symbol = normalize_symbol(query.get("symbol", [os.getenv("TRADE_SYMBOL", "XAUUSDT")])[0])
+            client = BinanceClient(symbol=symbol)
+            try:
+                load_trade_memory()
+                status = client.status()
+                idr_rate = Decimal(str(status.get("balance_summary", {}).get("usdt_idr_rate", "0")))
+                memory = TRADE_MEMORY.get(symbol, {})
+                self.send_json(
+                    {
+                        "ok": True,
+                        "symbol": symbol,
+                        "summary": trade_pnl_summary(symbol, idr_rate),
+                        "state": memory,
+                        "usdt_idr_rate": str(idr_rate),
+                    }
+                )
             except Exception as error:
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return

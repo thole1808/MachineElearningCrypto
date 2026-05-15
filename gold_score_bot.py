@@ -14,9 +14,11 @@ from app import (
     load_dotenv,
     load_trade_memory,
     notify_signal_once,
+    record_trade_pnl,
     record_auto_entry,
     score_trigger_ok,
     send_telegram,
+    trade_pnl_summary,
 )
 
 
@@ -52,6 +54,7 @@ def close_positions_if_needed(symbol: str) -> None:
         else:
             pips = (entry - mark) / pip_size
             side_label = "SHORT"
+        pnl_usdt = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
 
         should_profit_close = profit_pips > 0 and pips >= profit_pips
         should_loss_close = force_close_loss and loss_pips > 0 and pips <= -loss_pips
@@ -60,10 +63,16 @@ def close_positions_if_needed(symbol: str) -> None:
 
         reason = "PROFIT" if should_profit_close else "LOSS"
         result = client.close_position_amount(amount)
+        status = client.status()
+        idr_rate = Decimal(str(status.get("balance_summary", {}).get("usdt_idr_rate", "0")))
+        record_trade_pnl(symbol, pnl_usdt)
+        summary = trade_pnl_summary(symbol, idr_rate)
         message = (
             f"<b>GOLD BOT FORCE CLOSE {reason}</b>\n"
             f"{position_symbol} {side_label}\n"
             f"Pips: {pips}\n"
+            f"PnL: {pnl_usdt:+.4f} USDT / Rp {pnl_usdt * idr_rate:+,.0f}\n\n"
+            f"{summary}\n\n"
             f"Result: {json.dumps(result, ensure_ascii=False)}"
         )
         log(message.replace("<b>", "").replace("</b>", ""))
@@ -134,7 +143,17 @@ def main() -> None:
     interval = int(os.getenv("GOLD_BOT_INTERVAL", os.getenv("SCALPING_INTERVAL", "20")))
     log(f"GOLD SCORE BOT START symbol={symbol} interval={interval}s")
     log(f"AUTO_TRADE_ENABLED={os.getenv('AUTO_TRADE_ENABLED', 'false')}")
-    send_telegram(f"<b>GOLD SCORE BOT START</b>\nSymbol: {symbol}\nInterval: {interval}s")
+    try:
+        status = BinanceClient(symbol=symbol).status()
+        idr_rate = Decimal(str(status.get("balance_summary", {}).get("usdt_idr_rate", "0")))
+    except Exception:
+        idr_rate = Decimal("0")
+    send_telegram(
+        f"<b>GOLD SCORE BOT START</b>\n"
+        f"Symbol: {symbol}\n"
+        f"Interval: {interval}s\n\n"
+        f"{trade_pnl_summary(symbol, idr_rate)}"
+    )
 
     while True:
         try:
