@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 DATA_DIR = ROOT / "data"
 MEMORY_FILE = DATA_DIR / "conversations.jsonl"
+TRADE_MEMORY: dict[str, dict[str, int]] = {}
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -29,10 +30,88 @@ def auto_scalping_enabled() -> bool:
     return env_bool("AUTO_SCALPING", "false")
 
 
+def can_auto_enter(symbol: str) -> tuple[bool, str]:
+    clean_symbol = normalize_symbol(symbol)
+    now = int(time.time())
+    today = time.strftime("%Y-%m-%d")
+    memory = TRADE_MEMORY.setdefault(clean_symbol, {"last_entry": 0, "date": today, "count": 0})
+    if memory.get("date") != today:
+        memory["date"] = today
+        memory["count"] = 0
+    cooldown_seconds = int(os.getenv("ENTRY_COOLDOWN_SECONDS", "900"))
+    if now - int(memory.get("last_entry", 0)) < cooldown_seconds:
+        left = cooldown_seconds - (now - int(memory.get("last_entry", 0)))
+        return False, f"cooldown {left}s"
+    max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "3"))
+    if max_daily_trades > 0 and int(memory.get("count", 0)) >= max_daily_trades:
+        return False, f"MAX_DAILY_TRADES={max_daily_trades} tercapai"
+    return True, "ok"
+
+
+def record_auto_entry(symbol: str) -> None:
+    clean_symbol = normalize_symbol(symbol)
+    today = time.strftime("%Y-%m-%d")
+    memory = TRADE_MEMORY.setdefault(clean_symbol, {"last_entry": 0, "date": today, "count": 0})
+    if memory.get("date") != today:
+        memory["date"] = today
+        memory["count"] = 0
+    memory["last_entry"] = int(time.time())
+    memory["count"] = int(memory.get("count", 0)) + 1
+
+
+def score_trigger_ok(signal_info: dict) -> tuple[bool, str]:
+    if not env_bool("REQUIRE_SCORE_TRIGGER", "true"):
+        return True, "score trigger tidak diwajibkan"
+    side = signal_info.get("signal")
+    if side not in {"BUY", "SELL"}:
+        return False, "NO SIGNAL"
+    threshold = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "6"))
+    min_edge = int(os.getenv("SIGNAL_SCORE_MIN_EDGE", "2"))
+    buy_score = int(signal_info.get("score_buy", 0))
+    sell_score = int(signal_info.get("score_sell", 0))
+    if side == "BUY":
+        if buy_score < threshold:
+            return False, f"BUY score {buy_score} < {threshold}"
+        if buy_score - sell_score < min_edge:
+            return False, f"BUY edge {buy_score - sell_score} < {min_edge}"
+    if side == "SELL":
+        if sell_score < threshold:
+            return False, f"SELL score {sell_score} < {threshold}"
+        if sell_score - buy_score < min_edge:
+            return False, f"SELL edge {sell_score - buy_score} < {min_edge}"
+    return True, f"{side} score trigger valid"
+
+
+def normalize_symbol(symbol: str | None, fallback: str = "XAUUSDT") -> str:
+    clean_symbol = (symbol or fallback).strip().upper().replace(".P", "")
+    if ":" in clean_symbol:
+        clean_symbol = clean_symbol.split(":")[-1]
+    aliases = {
+        "GOLD": "XAUUSDT",
+        "XAU": "XAUUSDT",
+        "XAUUSD": "XAUUSDT",
+    }
+    return aliases.get(clean_symbol, clean_symbol)
+
+
+def symbol_pip_size(symbol: str) -> Decimal:
+    clean_symbol = normalize_symbol(symbol)
+    env_key = f"{clean_symbol}_PIP_SIZE"
+    return Decimal(os.getenv(env_key, os.getenv("GOLD_PIP_SIZE", "0.01")))
+
+
+def effective_order_usdt(symbol: str, amount: Decimal) -> Decimal:
+    clean_symbol = normalize_symbol(symbol)
+    if clean_symbol in {"XAUUSDT", "XAUUSD"}:
+        minimum = Decimal(os.getenv("GOLD_MIN_ORDER_USDT", "5"))
+        return max(amount, minimum)
+    return amount
+
+
 class BinanceClient:
     def __init__(self, symbol: str | None = None) -> None:
         self.mode = os.getenv("BINANCE_MODE", "testnet").strip().lower()
-        self.symbol = (symbol or os.getenv("TRADE_SYMBOL", "XRPUSDT")).strip().upper()
+        self.symbol = normalize_symbol(symbol, os.getenv("TRADE_SYMBOL", "XAUUSDT"))
         self.api_key = os.getenv("BINANCE_API_KEY", "").strip()
         self.api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
         self.key_type = os.getenv("BINANCE_KEY_TYPE", "hmac").strip().lower()
@@ -306,8 +385,30 @@ class BinanceClient:
         rounded = (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
         return format(rounded.normalize(), "f")
 
+    def tp_sl_prices(self, entry_side: str, entry_price: Decimal) -> tuple[Decimal, Decimal]:
+        if env_bool("USE_PIP_TP_SL", "true"):
+            pip_size = symbol_pip_size(self.symbol)
+            tp_pips = Decimal(os.getenv("TAKE_PROFIT_PIPS", "50"))
+            sl_pips = Decimal(os.getenv("STOP_LOSS_PIPS", "35"))
+            if entry_side == "BUY":
+                return entry_price + (tp_pips * pip_size), entry_price - (sl_pips * pip_size)
+            return entry_price - (tp_pips * pip_size), entry_price + (sl_pips * pip_size)
+
+        tp_percent = Decimal(os.getenv("TP_PERCENT", os.getenv("TAKE_PROFIT_PERCENT", "1")))
+        sl_percent = Decimal(os.getenv("SL_PERCENT", os.getenv("STOP_LOSS_PERCENT", "0.5")))
+        if entry_side == "BUY":
+            return (
+                entry_price * (Decimal("1") + tp_percent / Decimal("100")),
+                entry_price * (Decimal("1") - sl_percent / Decimal("100")),
+            )
+        return (
+            entry_price * (Decimal("1") - tp_percent / Decimal("100")),
+            entry_price * (Decimal("1") + sl_percent / Decimal("100")),
+        )
+
     def calculate_quantity(self, usdt_amount: Decimal | None = None) -> str:
         amount = usdt_amount or Decimal(os.getenv("ORDER_USDT", "5"))
+        amount = effective_order_usdt(self.symbol, amount)
         leverage = Decimal(os.getenv("DEFAULT_LEVERAGE", "3"))
         notional = amount * leverage
         min_notional = self.min_notional()
@@ -317,10 +418,20 @@ class BinanceClient:
                 f"Notional {notional} USDT terlalu kecil untuk {self.symbol}. "
                 f"Minimum {min_notional} USDT. Naikkan ORDER_USDT minimal sekitar {minimum_margin}."
             )
-        quantity = notional / self.get_price()
+        price = self.get_price()
+        quantity = notional / price
         rounded = self.round_quantity(quantity)
         if Decimal(rounded) <= 0:
             raise ValueError("Quantity menjadi 0. Naikkan ORDER_USDT atau pilih symbol lain.")
+        rounded_notional = Decimal(rounded) * price
+        if min_notional > 0 and rounded_notional < min_notional:
+            step = self.quantity_step()
+            minimum_quantity = ((min_notional / price) / step).to_integral_value(rounding=ROUND_DOWN) * step + step
+            minimum_margin = ((minimum_quantity * price) / leverage).quantize(Decimal("0.01"))
+            raise ValueError(
+                f"Notional setelah pembulatan {rounded_notional} USDT terlalu kecil untuk {self.symbol}. "
+                f"Naikkan ORDER_USDT minimal sekitar {minimum_margin}."
+            )
         return rounded
 
     def status(self) -> dict:
@@ -453,26 +564,24 @@ class BinanceClient:
         return self.signed_post("/fapi/v1/order", params)
 
     def place_tp_sl_orders(self, entry_side: str, entry_price: Decimal) -> dict:
-        tp_percent = Decimal(os.getenv("TP_PERCENT", os.getenv("TAKE_PROFIT_PERCENT", "1")))
-        sl_percent = Decimal(os.getenv("SL_PERCENT", os.getenv("STOP_LOSS_PERCENT", "0.5")))
-        if tp_percent <= 0 or sl_percent <= 0:
-            return {"skipped": True, "reason": "TP_PERCENT / SL_PERCENT tidak aktif."}
+        if not env_bool("USE_TP_SL_ORDERS", "true"):
+            return {
+                "skipped": True,
+                "reason": "USE_TP_SL_ORDERS=false. Exit dikelola auto force-close profit/SL bot.",
+            }
         entry_side = entry_side.upper()
         if entry_side == "BUY":
             close_side = "SELL"
-            tp_price = entry_price * (Decimal("1") + tp_percent / Decimal("100"))
-            sl_price = entry_price * (Decimal("1") - sl_percent / Decimal("100"))
         elif entry_side == "SELL":
             close_side = "BUY"
-            tp_price = entry_price * (Decimal("1") - tp_percent / Decimal("100"))
-            sl_price = entry_price * (Decimal("1") + sl_percent / Decimal("100"))
         else:
             raise ValueError("entry_side harus BUY atau SELL.")
+        tp_price, sl_price = self.tp_sl_prices(entry_side, entry_price)
+        use_algo_orders = env_bool("USE_ALGO_TP_SL_ORDERS", "true")
         tp_params = {
             "symbol": self.symbol,
             "side": close_side,
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": self.round_price(tp_price),
             "closePosition": "true",
             "workingType": "MARK_PRICE",
         }
@@ -480,18 +589,26 @@ class BinanceClient:
             "symbol": self.symbol,
             "side": close_side,
             "type": "STOP_MARKET",
-            "stopPrice": self.round_price(sl_price),
             "closePosition": "true",
             "workingType": "MARK_PRICE",
         }
+        if use_algo_orders:
+            tp_params["algoType"] = "CONDITIONAL"
+            tp_params["triggerPrice"] = self.round_price(tp_price)
+            sl_params["algoType"] = "CONDITIONAL"
+            sl_params["triggerPrice"] = self.round_price(sl_price)
+        else:
+            tp_params["stopPrice"] = self.round_price(tp_price)
+            sl_params["stopPrice"] = self.round_price(sl_price)
         resolved_position_side = self.order_position_side(entry_side)
         if resolved_position_side:
             tp_params["positionSide"] = resolved_position_side
             sl_params["positionSide"] = resolved_position_side
         if self.dry_run():
-            return {"dry_run": True, "tp_order": tp_params, "sl_order": sl_params}
-        tp_result = self.signed_post("/fapi/v1/order", tp_params)
-        sl_result = self.signed_post("/fapi/v1/order", sl_params)
+            return {"dry_run": True, "algo": use_algo_orders, "tp_order": tp_params, "sl_order": sl_params}
+        endpoint = "/fapi/v1/algoOrder" if use_algo_orders else "/fapi/v1/order"
+        tp_result = self.signed_post(endpoint, tp_params)
+        sl_result = self.signed_post(endpoint, sl_params)
         return {"tp_order": tp_result, "sl_order": sl_result}
 
     def close_position_market(self, position_side: str) -> dict:
@@ -542,8 +659,7 @@ class BinanceClient:
                 "reason": "AUTO_TRADE_ENABLED=false. Sinyal diterima tapi order tidak dieksekusi.",
                 "payload": payload,
             }
-        incoming_symbol = str(payload.get("symbol", self.symbol)).strip().upper().replace(".P", "")
-        self.symbol = incoming_symbol or self.symbol
+        self.symbol = normalize_symbol(str(payload.get("symbol", self.symbol)), self.symbol)
         raw_side = str(payload.get("side", payload.get("signal", ""))).strip().upper()
         side_map = {"LONG": "BUY", "BUY": "BUY", "SHORT": "SELL", "SELL": "SELL"}
         side = side_map.get(raw_side)
@@ -554,12 +670,22 @@ class BinanceClient:
         if self.has_reached_max_open_positions():
             return {"accepted": False, "reason": "Batas MAX_OPEN_POSITIONS tercapai. Entry baru dibatalkan.", "symbol": self.symbol}
         leverage = int(payload.get("leverage", os.getenv("DEFAULT_LEVERAGE", "3")))
-        usdt_amount = Decimal(str(payload.get("usdt", os.getenv("ORDER_USDT", "5"))))
+        usdt_amount = effective_order_usdt(
+            self.symbol,
+            Decimal(str(payload.get("usdt", os.getenv("ORDER_USDT", "5")))),
+        )
         quantity = self.calculate_quantity(usdt_amount)
         leverage_result = self.set_leverage(leverage)
         entry_price = self.get_price()
         order_result = self.place_futures_market_order(side, quantity=quantity)
-        tp_sl_result = self.place_tp_sl_orders(side, entry_price)
+        try:
+            tp_sl_result = self.place_tp_sl_orders(side, entry_price)
+        except RuntimeError as error:
+            tp_sl_result = {
+                "skipped": True,
+                "reason": "TP/SL order gagal dibuat, tapi entry market sudah terkirim.",
+                "error": str(error),
+            }
         return {
             "accepted": True,
             "dry_run": self.dry_run(),
@@ -616,12 +742,36 @@ def rsi(values: list[Decimal], period: int = 14) -> list[Decimal]:
     return result
 
 
+def atr(candles: list[dict], period: int = 14) -> list[Decimal]:
+    if len(candles) < 2:
+        return [Decimal("0")] * len(candles)
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    true_ranges: list[Decimal] = [highs[0] - lows[0]]
+    for index in range(1, len(candles)):
+        high_low = highs[index] - lows[index]
+        high_close = abs(highs[index] - closes[index - 1])
+        low_close = abs(lows[index] - closes[index - 1])
+        true_ranges.append(max(high_low, high_close, low_close))
+    result: list[Decimal] = [Decimal("0")] * len(candles)
+    for index in range(period - 1, len(candles)):
+        result[index] = sum(true_ranges[index - period + 1:index + 1]) / Decimal(period)
+    return result
+
+
+def average(values: list[Decimal]) -> Decimal:
+    if not values:
+        return Decimal("0")
+    return sum(values) / Decimal(len(values))
+
+
 def volume_ok(volumes: list[Decimal]) -> bool:
     if len(volumes) < 21:
         return True
     last_volume = volumes[-1]
     avg_volume = sum(volumes[-21:-1]) / Decimal("20")
-    multiplier = Decimal(os.getenv("VOLUME_MULTIPLIER", "1"))
+    multiplier = Decimal(os.getenv("VOLUME_MULTIPLIER", "1.2"))
     return last_volume >= avg_volume * multiplier
 
 
@@ -632,6 +782,7 @@ def generate_auto_signal(symbol: str) -> dict:
     market = client.klines(interval=interval, limit=limit)
     candles = market["candles"]
     closes = to_decimal_list([item["close"] for item in candles])
+    opens = to_decimal_list([item["open"] for item in candles])
     volumes = to_decimal_list([item["volume"] for item in candles])
     fast_period = int(os.getenv("EMA_FAST", "9"))
     slow_period = int(os.getenv("EMA_SLOW", "21"))
@@ -645,30 +796,152 @@ def generate_auto_signal(symbol: str) -> dict:
     slow_prev = ema_slow[-2]
     rsi_now = rsi_values[-1]
     last_close = closes[-1]
+    last_open = opens[-1]
     buy_rsi = Decimal(os.getenv("BUY_RSI", "55"))
     sell_rsi = Decimal(os.getenv("SELL_RSI", "45"))
     
-    # Perketat sinyal khusus untuk GOLD karena volatilitas tinggi
+    # Gold bisa punya ritme beda; biarkan threshold-nya tetap bisa diatur dari .env.
     if symbol in {"XAUUSDT", "XAUUSD"}:
-        buy_rsi = Decimal("60")  # Harus lebih bullish
-        sell_rsi = Decimal("40") # Harus lebih bearish
+        buy_rsi = Decimal(os.getenv("GOLD_BUY_RSI", "58"))
+        sell_rsi = Decimal(os.getenv("GOLD_SELL_RSI", "42"))
 
     has_volume = volume_ok(volumes)
+    ema_trend_up = fast_now > slow_now
+    ema_trend_down = fast_now < slow_now
+    gold_momentum_mode = symbol in {"XAUUSDT", "XAUUSD"} and env_bool("GOLD_MOMENTUM_MODE", "false")
+    strategy_mode = os.getenv("SIGNAL_STRATEGY_MODE", "score").strip().lower()
+    signal_score_threshold = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "4"))
     signal = None
     reason = "NO SIGNAL"
-    if fast_prev <= slow_prev and fast_now > slow_now and rsi_now >= buy_rsi and has_volume:
+
+    if strategy_mode == "score":
+        trend_interval = os.getenv("TREND_TIMEFRAME", "5m")
+        trend_limit = int(os.getenv("TREND_KLINE_LIMIT", "120"))
+        trend_market = client.klines(interval=trend_interval, limit=trend_limit)
+        trend_candles = trend_market["candles"]
+        trend_closes = to_decimal_list([item["close"] for item in trend_candles])
+        trend_fast = ema(trend_closes, int(os.getenv("TREND_EMA_FAST", "21")))
+        trend_slow = ema(trend_closes, int(os.getenv("TREND_EMA_SLOW", "55")))
+        trend_rsi_values = rsi(trend_closes, rsi_period)
+        trend_up = trend_fast[-1] > trend_slow[-1] and trend_closes[-1] > trend_fast[-1]
+        trend_down = trend_fast[-1] < trend_slow[-1] and trend_closes[-1] < trend_fast[-1]
+        trend_rsi = trend_rsi_values[-1]
+        atr_values = atr(candles, int(os.getenv("ATR_PERIOD", "14")))
+        atr_now = atr_values[-1]
+        atr_avg = average([value for value in atr_values[-21:] if value > 0])
+        volatility_ok = atr_avg == 0 or (
+            atr_now >= atr_avg * Decimal(os.getenv("ATR_MIN_MULTIPLIER", "0.75"))
+            and atr_now <= atr_avg * Decimal(os.getenv("ATR_MAX_MULTIPLIER", "1.8"))
+        )
+        bullish_candle = last_close > last_open
+        bearish_candle = last_close < last_open
+        recent_high = max(closes[-6:-1]) if len(closes) >= 6 else last_close
+        recent_low = min(closes[-6:-1]) if len(closes) >= 6 else last_close
+        breakout_up = last_close > recent_high
+        breakout_down = last_close < recent_low
+
+        buy_score = 0
+        sell_score = 0
+        buy_reasons: list[str] = []
+        sell_reasons: list[str] = []
+
+        if trend_up:
+            buy_score += 2
+            buy_reasons.append(f"{trend_interval} trend naik")
+        if trend_down:
+            sell_score += 2
+            sell_reasons.append(f"{trend_interval} trend turun")
+        if ema_trend_up:
+            buy_score += 1
+            buy_reasons.append(f"{interval} EMA naik")
+        if ema_trend_down:
+            sell_score += 1
+            sell_reasons.append(f"{interval} EMA turun")
+        if rsi_now >= buy_rsi and trend_rsi >= Decimal(os.getenv("TREND_BUY_RSI", "52")):
+            buy_score += 1
+            buy_reasons.append(f"RSI kuat {rsi_now.quantize(Decimal('0.01'))}")
+        if rsi_now <= sell_rsi and trend_rsi <= Decimal(os.getenv("TREND_SELL_RSI", "48")):
+            sell_score += 1
+            sell_reasons.append(f"RSI lemah {rsi_now.quantize(Decimal('0.01'))}")
+        if bullish_candle:
+            buy_score += 1
+            buy_reasons.append("candle hijau")
+        if bearish_candle:
+            sell_score += 1
+            sell_reasons.append("candle merah")
+        if breakout_up:
+            buy_score += 1
+            buy_reasons.append("break recent high")
+        if breakout_down:
+            sell_score += 1
+            sell_reasons.append("break recent low")
+        if has_volume:
+            buy_score += 1
+            sell_score += 1
+            buy_reasons.append("volume valid")
+            sell_reasons.append("volume valid")
+        if not volatility_ok:
+            buy_score -= 2
+            sell_score -= 2
+        if env_bool("DISABLE_COUNTER_TREND", "true"):
+            if trend_down:
+                buy_score -= 3
+            if trend_up:
+                sell_score -= 3
+
+        if buy_score >= signal_score_threshold and buy_score > sell_score:
+            signal = "BUY"
+            reason = f"SCORE BUY {buy_score}/{signal_score_threshold}: " + ", ".join(buy_reasons)
+        elif sell_score >= signal_score_threshold and sell_score > buy_score:
+            signal = "SELL"
+            reason = f"SCORE SELL {sell_score}/{signal_score_threshold}: " + ", ".join(sell_reasons)
+        else:
+            reason = (
+                f"NO SIGNAL: buy_score={buy_score}, sell_score={sell_score}, need={signal_score_threshold}, "
+                f"trend_rsi={trend_rsi.quantize(Decimal('0.01'))}, atr_ok={volatility_ok}, volume_ok={has_volume}"
+            )
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "signal": signal,
+            "reason": reason,
+            "close": str(last_close),
+            "ema_fast": str(fast_now),
+            "ema_slow": str(slow_now),
+            "rsi": str(rsi_now.quantize(Decimal("0.01"))),
+            "score_buy": buy_score,
+            "score_sell": sell_score,
+            "trend_interval": trend_interval,
+            "trend_rsi": str(trend_rsi.quantize(Decimal("0.01"))),
+            "atr": str(atr_now),
+        }
+
+    if fast_prev <= slow_prev and ema_trend_up and rsi_now >= buy_rsi and has_volume:
         signal = "BUY"
         reason = "EMA fast cross up + RSI kuat"
-    elif fast_prev >= slow_prev and fast_now < slow_now and rsi_now <= sell_rsi and has_volume:
+    elif fast_prev >= slow_prev and ema_trend_down and rsi_now <= sell_rsi and has_volume:
         signal = "SELL"
         reason = "EMA fast cross down + RSI lemah"
     elif env_bool("FAST_SIGNAL_MODE", "false") and has_volume:
-        if fast_now > slow_now and rsi_now >= buy_rsi:
+        if ema_trend_up and rsi_now >= buy_rsi:
             signal = "BUY"
             reason = "FAST MODE: trend EMA naik + RSI cukup kuat"
-        elif fast_now < slow_now and rsi_now <= sell_rsi:
+        elif ema_trend_down and rsi_now <= sell_rsi:
             signal = "SELL"
             reason = "FAST MODE: trend EMA turun + RSI cukup lemah"
+    if not signal and gold_momentum_mode and has_volume:
+        if rsi_now >= buy_rsi:
+            signal = "BUY"
+            reason = "GOLD MOMENTUM: RSI kuat, masuk tanpa tunggu EMA cross"
+        elif rsi_now <= sell_rsi:
+            signal = "SELL"
+            reason = "GOLD MOMENTUM: RSI lemah, masuk tanpa tunggu EMA cross"
+    if not signal:
+        ema_text = "naik" if ema_trend_up else "turun" if ema_trend_down else "datar"
+        reason = (
+            f"NO SIGNAL: EMA {ema_text}, RSI={rsi_now.quantize(Decimal('0.01'))}, "
+            f"buy>={buy_rsi}, sell<={sell_rsi}, volume_ok={has_volume}"
+        )
     return {
         "symbol": symbol,
         "interval": interval,
@@ -682,7 +955,7 @@ def generate_auto_signal(symbol: str) -> dict:
 
 
 def auto_scalping_loop() -> None:
-    symbols = [s.strip().upper() for s in os.getenv("SCALPING_SYMBOLS", "XRPUSDT,SOLUSDT,DOGEUSDT").split(",") if s.strip()]
+    symbols = [normalize_symbol(s) for s in os.getenv("SCALPING_SYMBOLS", "XAUUSDT").split(",") if s.strip()]
     interval_seconds = int(os.getenv("SCALPING_INTERVAL", "60"))
     print("=" * 70)
     print("AUTO SCALPING LOOP START")
@@ -697,12 +970,20 @@ def auto_scalping_loop() -> None:
             max_positions = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
 
             # AUTO FORCE CLOSE PROFIT UNTUK SEMUA POSISI TERBUKA
-            # Jika posisi sudah terlalu lama dan sudah profit kecil, bot tutup market.
+            # Jika mode profit cepat aktif, bot tutup market begitu posisi sudah hijau
+            # sesuai target FORCE_CLOSE_PROFIT_PERCENT.
             # Setting dari .env:
-            # MAX_HOLD_SECONDS=300
+            # PROFIT_QUICK_CLOSE=true
+            # FORCE_CLOSE_MIN_HOLD_SECONDS=0
             # FORCE_CLOSE_PROFIT_PERCENT=0.15
+            quick_profit_close = env_bool("PROFIT_QUICK_CLOSE", "true")
+            force_close_loss = env_bool("FORCE_CLOSE_LOSS", "true")
             max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "300"))
+            min_profit_hold_seconds = int(os.getenv("FORCE_CLOSE_MIN_HOLD_SECONDS", "0"))
             force_close_profit_percent = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PERCENT", "0.15"))
+            force_close_loss_percent = Decimal(os.getenv("FORCE_CLOSE_LOSS_PERCENT", os.getenv("SL_PERCENT", "0.25")))
+            force_close_profit_pips = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PIPS", os.getenv("TAKE_PROFIT_PIPS", "50")))
+            force_close_loss_pips = Decimal(os.getenv("FORCE_CLOSE_LOSS_PIPS", os.getenv("STOP_LOSS_PIPS", "35")))
 
             for position in positions:
                 try:
@@ -718,12 +999,32 @@ def auto_scalping_loop() -> None:
                     else:
                         hold_seconds = max_hold_seconds
 
-                    if pnl_percent >= force_close_profit_percent and hold_seconds >= max_hold_seconds:
+                    entry_price = Decimal(str(position.get("entryPrice", "0")))
+                    mark_price = Decimal(str(position.get("markPrice", "0")))
+                    pip_size = symbol_pip_size(position_symbol)
+                    price_move = Decimal("0")
+                    if entry_price > 0 and mark_price > 0 and pip_size > 0:
+                        if position_amount > 0:
+                            price_move = (mark_price - entry_price) / pip_size
+                        else:
+                            price_move = (entry_price - mark_price) / pip_size
+
+                    profit_target_hit = pnl_percent >= force_close_profit_percent
+                    if force_close_profit_pips > 0:
+                        profit_target_hit = price_move >= force_close_profit_pips
+                    profit_hold_ok = hold_seconds >= min_profit_hold_seconds
+                    time_exit_ok = (not quick_profit_close) and hold_seconds >= max_hold_seconds
+                    loss_limit_hit = force_close_loss and pnl_percent <= -force_close_loss_percent
+                    if force_close_loss and force_close_loss_pips > 0:
+                        loss_limit_hit = price_move <= -force_close_loss_pips
+
+                    if profit_target_hit and (quick_profit_close and profit_hold_ok or time_exit_ok) or loss_limit_hit:
                         close_client = BinanceClient(symbol=position_symbol)
                         side_label = "LONG" if position_amount > 0 else "SHORT"
+                        close_reason = "LOSS" if loss_limit_hit else "PROFIT"
                         print(
-                            f"[FORCE CLOSE PROFIT] {position_symbol} {side_label} "
-                            f"pnl={pnl_percent}% hold={hold_seconds}s"
+                            f"[FORCE CLOSE {close_reason}] {position_symbol} {side_label} "
+                            f"pnl={pnl_percent}% pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
                         )
                         close_result = close_client.close_position_amount(position_amount)
                         print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
@@ -742,6 +1043,14 @@ def auto_scalping_loop() -> None:
                     )
                     if not signal_info["signal"]:
                         continue
+                    trigger_ok, trigger_reason = score_trigger_ok(signal_info)
+                    if not trigger_ok:
+                        print(f"[SKIP] {symbol} {trigger_reason}.")
+                        continue
+                    can_enter, enter_reason = can_auto_enter(symbol)
+                    if not can_enter:
+                        print(f"[SKIP] {symbol} {enter_reason}.")
+                        continue
                     client = BinanceClient(symbol=symbol)
                     if env_bool("PREVENT_DOUBLE_POSITION", "true") and client.has_open_position():
                         print(f"[SKIP] {symbol} masih punya posisi terbuka.")
@@ -752,13 +1061,14 @@ def auto_scalping_loop() -> None:
                     payload = {
                         "symbol": symbol,
                         "side": signal_info["signal"],
-                        "usdt": os.getenv("ORDER_USDT", "5"),
+                        "usdt": str(effective_order_usdt(symbol, Decimal(os.getenv("ORDER_USDT", "5")))),
                         "leverage": os.getenv("DEFAULT_LEVERAGE", "3"),
                     }
                     print(f"[AUTO ENTRY] {payload}")
                     result = client.handle_webhook_signal(payload)
                     print("[AUTO RESULT]", json.dumps(result, ensure_ascii=False))
                     if result.get("accepted"):
+                        record_auto_entry(symbol)
                         open_count += 1
                 except Exception as error:
                     print(f"[PAIR ERROR] {symbol}: {error}")
@@ -917,9 +1227,9 @@ class BotHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/auto-signal":
             query = urllib.parse.parse_qs(parsed.query)
-            symbol = query.get("symbol", [os.getenv("TRADE_SYMBOL", "XRPUSDT")])[0]
+            symbol = query.get("symbol", [os.getenv("TRADE_SYMBOL", "XAUUSDT")])[0]
             try:
-                self.send_json({"ok": True, "signal": generate_auto_signal(symbol.upper())})
+                self.send_json({"ok": True, "signal": generate_auto_signal(normalize_symbol(symbol))})
             except Exception as error:
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return
@@ -935,12 +1245,41 @@ class BotHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "JSON tidak valid"}, status=400)
             return
         if parsed.path == "/api/tradingview/webhook":
-            client = BinanceClient(symbol=str(body.get("symbol", os.getenv("TRADE_SYMBOL", "XRPUSDT"))))
+            client = BinanceClient(symbol=str(body.get("symbol", os.getenv("TRADE_SYMBOL", "XAUUSDT"))))
             try:
                 result = client.handle_webhook_signal(body)
                 self.send_json({"ok": True, "result": result})
             except Exception as error:
                 self.send_json({"ok": False, "error": str(error)}, status=400)
+            return
+        if parsed.path == "/api/auto-signal/trade":
+            if not env_bool("ALLOW_MANUAL_SIGNAL_TRADE", "false"):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": "Manual signal trade nonaktif. Entry hanya dari AUTO_SCALPING bot atau TradingView webhook.",
+                    },
+                    status=403,
+                )
+                return
+            symbol = normalize_symbol(str(body.get("symbol", os.getenv("TRADE_SYMBOL", "XAUUSDT"))))
+            signal_info = generate_auto_signal(symbol)
+            side = signal_info.get("signal")
+            if not side:
+                self.send_json({"ok": False, "error": signal_info.get("reason", "NO SIGNAL"), "signal": signal_info}, status=400)
+                return
+            client = BinanceClient(symbol=symbol)
+            payload = {
+                "symbol": symbol,
+                "side": side,
+                "usdt": str(effective_order_usdt(symbol, Decimal(str(body.get("usdt", os.getenv("ORDER_USDT", "5")))))),
+                "leverage": str(body.get("leverage", os.getenv("DEFAULT_LEVERAGE", "3"))),
+            }
+            try:
+                result = client.handle_webhook_signal(payload)
+                self.send_json({"ok": True, "signal": signal_info, "result": result})
+            except Exception as error:
+                self.send_json({"ok": False, "error": str(error), "signal": signal_info}, status=400)
             return
         if parsed.path != "/api/chat":
             self.send_error(404, "Not found")

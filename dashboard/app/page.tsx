@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 type Balance = {
   asset: string;
@@ -87,9 +87,13 @@ type AutoSignalResponse = {
   error?: string;
 };
 
-const defaultSymbol = "SOLUSDT";
+const defaultSymbol = "XAUUSDT";
 const realtimeRefreshMs = 2000;
 type BalanceCurrency = "USDT" | "IDR";
+
+const subscribeHydration = () => () => undefined;
+const clientSnapshot = () => true;
+const serverSnapshot = () => false;
 
 function formatPrice(value?: string) {
   if (!value) return "-";
@@ -153,6 +157,7 @@ function toneClass(value?: string) {
 }
 
 export default function Home() {
+  const mounted = useSyncExternalStore(subscribeHydration, clientSnapshot, serverSnapshot);
   const [status, setStatus] = useState<BinanceStatus | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState(defaultSymbol);
   const [error, setError] = useState("");
@@ -275,6 +280,22 @@ export default function Home() {
     }
     return formatSignedUsd(value);
   }, [showIdr, idrRate, hideBalance]);
+
+  if (!mounted) {
+    return (
+      <main className="terminal">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Futures Trading Console</p>
+            <h1>Machine Elearning Crypto</h1>
+          </div>
+          <div className="topbar-actions">
+            <span className="status-pill">Loading</span>
+          </div>
+        </header>
+      </main>
+    );
+  }
 
   return (
     <main className="terminal">
@@ -440,9 +461,11 @@ export default function Home() {
               <h2>Signal</h2>
               <p>Pair aktif refresh tiap {realtimeRefreshMs / 1000} detik.</p>
             </div>
-            <strong className={autoSignal?.signal === "BUY" ? "signal-badge buy" : autoSignal?.signal === "SELL" ? "signal-badge sell" : "signal-badge"}>
-              {autoSignal?.signal || "NO SIGNAL"}
-            </strong>
+            <div className="signal-actions">
+              <strong className={autoSignal?.signal === "BUY" ? "signal-badge buy" : autoSignal?.signal === "SELL" ? "signal-badge sell" : "signal-badge"}>
+                {autoSignal?.signal || "NO SIGNAL"}
+              </strong>
+            </div>
           </header>
           {signalError ? <div className="alert compact">{signalError}</div> : null}
           <div className="signal-grid">

@@ -369,6 +369,12 @@ h2 {
   box-shadow: 0 0 15px var(--red-glow);
 }
 
+.signal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .signal-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(110px, 1fr));
@@ -487,6 +493,11 @@ h2 {
 
   .topbar-actions {
     justify-content: flex-start;
+  }
+
+  .signal-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .signal-grid {
