@@ -92,6 +92,26 @@ type AutoSignalResponse = {
   error?: string;
 };
 
+type BotPnlState = {
+  total_pnl_usdt?: string;
+  today_pnl_usdt?: string;
+  total_wins?: number;
+  total_losses?: number;
+  today_wins?: number;
+  today_losses?: number;
+  total_trades?: number;
+  last_trade_at?: string;
+};
+
+type BotPnlResponse = {
+  ok: boolean;
+  symbol?: string;
+  summary?: string;
+  state?: BotPnlState;
+  usdt_idr_rate?: string;
+  error?: string;
+};
+
 const defaultSymbol = "XAUUSDT";
 const realtimeRefreshMs = 2000;
 type BalanceCurrency = "USDT" | "IDR";
@@ -118,9 +138,9 @@ function formatNumber(value?: string) {
 function formatSignedUsd(value?: string) {
   if (!value) return "-";
   const number = Number(value);
-  const rounded = Math.round(number);
-  return `${rounded > 0 ? "+" : ""}${rounded.toLocaleString("en-US", {
-    maximumFractionDigits: 0,
+  return `${number > 0 ? "+" : ""}${number.toLocaleString("en-US", {
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
   })} USDT`;
 }
 
@@ -157,6 +177,19 @@ function formatIdr(value?: string) {
   });
 }
 
+function formatSignedIdr(value?: string) {
+  if (!value) return "-";
+  const number = Number(value);
+  const formatted = Math.round(Math.abs(number)).toLocaleString("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  });
+  if (number > 0) return `+${formatted}`;
+  if (number < 0) return `-${formatted}`;
+  return formatted;
+}
+
 function roundedNumber(value?: string) {
   if (!value) return 0;
   return Math.round(Number(value));
@@ -180,6 +213,8 @@ export default function Home() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
+  const [botPnl, setBotPnl] = useState<BotPnlResponse | null>(null);
+  const [botPnlError, setBotPnlError] = useState("");
   const [hideBalance, setHideBalance] = useState(false);
 
   const serverTime = useMemo(() => {
@@ -234,23 +269,39 @@ export default function Home() {
     }
   }, [selectedSymbol]);
 
+  const loadBotPnl = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/bot/pnl?symbol=${selectedSymbol}`);
+      const body = (await response.json()) as BotPnlResponse;
+      if (!response.ok || !body.ok) {
+        throw new Error(body.error || "Backend belum bisa membaca P&L bot.");
+      }
+      setBotPnl(body);
+      setBotPnlError("");
+    } catch (caught) {
+      setBotPnlError(caught instanceof Error ? caught.message : "Terjadi error saat membaca P&L bot.");
+    }
+  }, [selectedSymbol]);
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
       loadAutoSignal();
+      loadBotPnl();
     }, realtimeRefreshMs);
 
     return () => window.clearInterval(timer);
-  }, [checkBinance, loadAutoSignal]);
+  }, [checkBinance, loadAutoSignal, loadBotPnl]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
       loadAutoSignal();
+      loadBotPnl();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadAutoSignal]);
+  }, [checkBinance, loadAutoSignal, loadBotPnl]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -300,6 +351,12 @@ export default function Home() {
   const aiAdvice = autoSignal?.signal
     ? `Sinyal ${autoSignal.signal} terdeteksi, tapi eksekusi live tetap mengikuti AUTO_TRADE_ENABLED dan limit risiko.`
     : "Sinyal belum cukup kuat untuk entry. Tunggu score memenuhi threshold dan hindari entry manual.";
+  const botPnlState = botPnl?.state || {};
+  const botTodayPnlUsdt = botPnlState.today_pnl_usdt || "0";
+  const botTotalPnlUsdt = botPnlState.total_pnl_usdt || "0";
+  const botPnlRate = Number(botPnl?.usdt_idr_rate || balanceSummary?.usdt_idr_rate || 0);
+  const botTodayPnlIdr = botPnlRate ? String(Number(botTodayPnlUsdt) * botPnlRate) : "0";
+  const botTotalPnlIdr = botPnlRate ? String(Number(botTotalPnlUsdt) * botPnlRate) : "0";
 
   const formatAnySignedUsd = useCallback((value?: string) => {
     if (!value) return "-";
@@ -527,6 +584,27 @@ export default function Home() {
               <section>
                 <span>Saran AI</span>
                 <p>{aiAdvice}</p>
+              </section>
+              <section>
+                <span>P&L Bot</span>
+                {botPnlError ? <div className="alert compact">{botPnlError}</div> : null}
+                <div className="ai-levels bot-pnl-levels">
+                  <div>
+                    <small>Hari Ini</small>
+                    <strong className={toneClass(botTodayPnlUsdt)}>{hideBalance ? "***" : formatSignedUsd(botTodayPnlUsdt)}</strong>
+                    <small>{hideBalance ? "***" : formatSignedIdr(botTodayPnlIdr)}</small>
+                  </div>
+                  <div>
+                    <small>Total Bot</small>
+                    <strong className={toneClass(botTotalPnlUsdt)}>{hideBalance ? "***" : formatSignedUsd(botTotalPnlUsdt)}</strong>
+                    <small>{hideBalance ? "***" : formatSignedIdr(botTotalPnlIdr)}</small>
+                  </div>
+                  <div>
+                    <small>Win/Loss Hari Ini</small>
+                    <strong>{botPnlState.today_wins ?? 0}/{botPnlState.today_losses ?? 0}</strong>
+                    <small>Total trade {botPnlState.total_trades ?? 0}</small>
+                  </div>
+                </div>
               </section>
             </div>
 
