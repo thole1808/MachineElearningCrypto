@@ -25,6 +25,7 @@ SIGNAL_NOTIFY_MEMORY: dict[str, int] = {}
 AUTO_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": []}
 SIGNAL_CACHE: dict[str, dict[str, object]] = {}
 FUTURES_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": set()}
+POSITION_PROFIT_MEMORY: dict[str, Decimal] = {}
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -1866,6 +1867,11 @@ def auto_scalping_loop() -> None:
             force_close_loss_percent = Decimal(os.getenv("FORCE_CLOSE_LOSS_PERCENT", os.getenv("SL_PERCENT", "0.25")))
             force_close_profit_pips = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PIPS", os.getenv("TAKE_PROFIT_PIPS", "50")))
             force_close_loss_pips = Decimal(os.getenv("FORCE_CLOSE_LOSS_PIPS", os.getenv("STOP_LOSS_PIPS", "35")))
+            break_even_stop = env_bool("USE_BREAK_EVEN_STOP", "true")
+            break_even_activate_usdt = Decimal(os.getenv("BREAK_EVEN_ACTIVATE_PROFIT_USDT", "0.01"))
+            break_even_lock_usdt = Decimal(os.getenv("BREAK_EVEN_LOCK_PROFIT_USDT", "0.001"))
+            trailing_profit = env_bool("USE_TRAILING_PROFIT_LOCK", "true")
+            trailing_drawdown_usdt = Decimal(os.getenv("TRAILING_PROFIT_DRAWDOWN_USDT", "0.015"))
 
             for position in positions:
                 try:
@@ -1876,6 +1882,10 @@ def auto_scalping_loop() -> None:
 
                     pnl_percent = Decimal(str(position.get("pnlPercent", "0")))
                     pnl_usdt = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
+                    side_label = "LONG" if position_amount > 0 else "SHORT"
+                    profit_key = f"{position_symbol}:{side_label}"
+                    peak_profit = max(POSITION_PROFIT_MEMORY.get(profit_key, pnl_usdt), pnl_usdt)
+                    POSITION_PROFIT_MEMORY[profit_key] = peak_profit
                     update_time_ms = int(position.get("updateTime", "0") or "0")
                     if update_time_ms > 0:
                         hold_seconds = int(time.time() - (update_time_ms / 1000))
@@ -1904,16 +1914,40 @@ def auto_scalping_loop() -> None:
                         loss_limit_hit = pnl_usdt <= -force_close_loss_usdt
                     if force_close_loss and force_close_loss_pips > 0:
                         loss_limit_hit = price_move <= -force_close_loss_pips
+                    break_even_hit = (
+                        break_even_stop
+                        and peak_profit >= break_even_activate_usdt
+                        and pnl_usdt <= break_even_lock_usdt
+                    )
+                    trailing_profit_hit = (
+                        trailing_profit
+                        and peak_profit >= break_even_activate_usdt
+                        and trailing_drawdown_usdt > 0
+                        and peak_profit - pnl_usdt >= trailing_drawdown_usdt
+                        and pnl_usdt > break_even_lock_usdt
+                    )
 
-                    if profit_target_hit and (quick_profit_close and profit_hold_ok or time_exit_ok) or loss_limit_hit:
+                    if (
+                        profit_target_hit and (quick_profit_close and profit_hold_ok or time_exit_ok)
+                        or loss_limit_hit
+                        or break_even_hit
+                        or trailing_profit_hit
+                    ):
                         close_client = BinanceClient(symbol=position_symbol)
-                        side_label = "LONG" if position_amount > 0 else "SHORT"
-                        close_reason = "LOSS" if loss_limit_hit else "PROFIT"
+                        if loss_limit_hit:
+                            close_reason = "LOSS"
+                        elif break_even_hit:
+                            close_reason = "BREAK EVEN"
+                        elif trailing_profit_hit:
+                            close_reason = "TRAILING PROFIT"
+                        else:
+                            close_reason = "PROFIT"
                         print(
                             f"[FORCE CLOSE {close_reason}] {position_symbol} {side_label} "
-                            f"pnl={pnl_percent}% usdt={pnl_usdt} pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
+                            f"pnl={pnl_percent}% usdt={pnl_usdt} peak={peak_profit} pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
                         )
                         close_result = close_client.close_position_amount(position_amount)
+                        POSITION_PROFIT_MEMORY.pop(profit_key, None)
                         print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
                         send_telegram(
                             f"<b>FORCE CLOSE {close_reason}</b>\n"
