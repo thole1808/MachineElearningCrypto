@@ -291,6 +291,19 @@ def can_auto_enter(symbol: str) -> tuple[bool, str]:
     max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "3"))
     if max_daily_trades > 0 and int(memory.get("count", 0)) >= max_daily_trades:
         return False, f"MAX_DAILY_TRADES={max_daily_trades} tercapai"
+    max_consecutive_losses = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "0"))
+    if max_consecutive_losses > 0 and int(memory.get("loss_streak", 0)) >= max_consecutive_losses:
+        return False, f"loss streak {memory.get('loss_streak', 0)} >= {max_consecutive_losses}"
+    max_daily_loss_usdt = Decimal(os.getenv("MAX_DAILY_LOSS_USDT", "0"))
+    today_pnl_usdt = Decimal(str(memory.get("today_pnl_usdt", "0"))) if memory.get("pnl_date") == today else Decimal("0")
+    if max_daily_loss_usdt > 0 and today_pnl_usdt <= -max_daily_loss_usdt:
+        return False, f"daily loss {today_pnl_usdt} <= -{max_daily_loss_usdt}"
+    stop_after_daily_profit_usdt = Decimal(os.getenv("STOP_AFTER_DAILY_PROFIT_USDT", "0"))
+    if stop_after_daily_profit_usdt > 0 and today_pnl_usdt >= stop_after_daily_profit_usdt:
+        return False, f"daily profit target {today_pnl_usdt} >= {stop_after_daily_profit_usdt}"
+    stop_after_today_wins = int(os.getenv("STOP_AFTER_TODAY_WINS", "0"))
+    if stop_after_today_wins > 0 and int(memory.get("today_wins", 0)) >= stop_after_today_wins:
+        return False, f"today wins {memory.get('today_wins', 0)} >= {stop_after_today_wins}"
     return True, "ok"
 
 
@@ -322,9 +335,13 @@ def record_trade_pnl(symbol: str, pnl_usdt: Decimal) -> dict:
     if pnl_usdt >= 0:
         memory["total_wins"] = int(memory.get("total_wins", 0)) + 1
         memory["today_wins"] = int(memory.get("today_wins", 0)) + 1
+        memory["win_streak"] = int(memory.get("win_streak", 0)) + 1
+        memory["loss_streak"] = 0
     else:
         memory["total_losses"] = int(memory.get("total_losses", 0)) + 1
         memory["today_losses"] = int(memory.get("today_losses", 0)) + 1
+        memory["loss_streak"] = int(memory.get("loss_streak", 0)) + 1
+        memory["win_streak"] = 0
     save_trade_memory()
     return memory
 
@@ -354,19 +371,38 @@ def score_trigger_ok(signal_info: dict) -> tuple[bool, str]:
     if side == "SELL" and not env_bool("ALLOW_SHORT", "true"):
         return False, "ALLOW_SHORT=false"
     threshold = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "6"))
+    hard_threshold = int(os.getenv("SIGNAL_SCORE_HARD_THRESHOLD", "0"))
     min_edge = int(os.getenv("SIGNAL_SCORE_MIN_EDGE", "2"))
     buy_score = int(signal_info.get("score_buy", 0))
     sell_score = int(signal_info.get("score_sell", 0))
+    signal_rsi = Decimal(str(signal_info.get("rsi", "0")))
+    trend_rsi = Decimal(str(signal_info.get("trend_rsi", signal_info.get("rsi", "0"))))
+    min_buy_rsi = Decimal(os.getenv("ENTRY_BUY_MIN_RSI", os.getenv("BUY_RSI", "55")))
+    max_sell_rsi = Decimal(os.getenv("ENTRY_SELL_MAX_RSI", os.getenv("SELL_RSI", "45")))
+    min_buy_trend_rsi = Decimal(os.getenv("ENTRY_BUY_MIN_TREND_RSI", os.getenv("TREND_BUY_RSI", "52")))
+    max_sell_trend_rsi = Decimal(os.getenv("ENTRY_SELL_MAX_TREND_RSI", os.getenv("TREND_SELL_RSI", "48")))
     if side == "BUY":
         if buy_score < threshold:
             return False, f"BUY score {buy_score} < {threshold}"
+        if hard_threshold > 0 and buy_score < hard_threshold:
+            return False, f"BUY hard score {buy_score} < {hard_threshold}"
         if buy_score - sell_score < min_edge:
             return False, f"BUY edge {buy_score - sell_score} < {min_edge}"
+        if signal_rsi < min_buy_rsi:
+            return False, f"BUY RSI {signal_rsi} < {min_buy_rsi}"
+        if trend_rsi < min_buy_trend_rsi:
+            return False, f"BUY trend RSI {trend_rsi} < {min_buy_trend_rsi}"
     if side == "SELL":
         if sell_score < threshold:
             return False, f"SELL score {sell_score} < {threshold}"
+        if hard_threshold > 0 and sell_score < hard_threshold:
+            return False, f"SELL hard score {sell_score} < {hard_threshold}"
         if sell_score - buy_score < min_edge:
             return False, f"SELL edge {sell_score - buy_score} < {min_edge}"
+        if signal_rsi > max_sell_rsi:
+            return False, f"SELL RSI {signal_rsi} > {max_sell_rsi}"
+        if trend_rsi > max_sell_trend_rsi:
+            return False, f"SELL trend RSI {trend_rsi} > {max_sell_trend_rsi}"
     return True, f"{side} score trigger valid"
 
 
