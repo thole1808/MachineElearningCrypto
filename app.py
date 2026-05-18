@@ -137,7 +137,15 @@ def cached_auto_signal(symbol: str, force_refresh: bool = False) -> dict:
         and isinstance(cached.get("signal"), dict)
     ):
         return dict(cached["signal"])
-    signal = generate_auto_signal(clean_symbol)
+    try:
+        signal = generate_auto_signal(clean_symbol)
+    except Exception as error:
+        if cached and isinstance(cached.get("signal"), dict):
+            stale_signal = dict(cached["signal"])
+            stale_signal["reason"] = f"STALE SIGNAL CACHE: {error}"
+            stale_signal["stale"] = True
+            return stale_signal
+        raise
     SIGNAL_CACHE[clean_symbol] = {"ts": now, "signal": signal}
     return signal
 
@@ -567,11 +575,14 @@ class BinanceClient:
 
     def fetch_json(self, request: urllib.request.Request) -> dict | list:
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            timeout_seconds = int(os.getenv("BINANCE_HTTP_TIMEOUT_SECONDS", "8"))
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Binance API error {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Binance request gagal: {error}") from error
 
     def public_get(self, path: str, params: dict[str, str] | None = None) -> dict | list:
         query = urllib.parse.urlencode(params or {})
@@ -998,7 +1009,25 @@ class BinanceClient:
                 res["open_positions"] = self.open_positions()
                 res["server_time"] = {"serverTime": int(time.time() * 1000)}
                 return res
-        return self.status_rest()
+        try:
+            return self.status_rest()
+        except Exception as error:
+            return {
+                "mode": self.mode,
+                "market_type": "futures" if self.is_futures() else "spot",
+                "symbol": self.symbol,
+                "base_url": self.base_url,
+                "key_type": self.key_type,
+                "has_keys": self.has_signed_credentials(),
+                "private_key_configured": self.key_type == "rsa" and self.private_key_path.exists(),
+                "auto_trade_enabled": self.auto_trade_enabled(),
+                "dry_run": self.dry_run(),
+                "auto_scalping": auto_scalping_enabled(),
+                "balances": [],
+                "open_positions": [],
+                "account_error": str(error),
+                "server_time": {"serverTime": int(time.time() * 1000)},
+            }
 
     def open_positions_rest(self) -> list[dict]:
         rows = self.signed_get("/fapi/v2/positionRisk")
@@ -2418,7 +2447,25 @@ class BotHandler(SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             symbol = query.get("symbol", [os.getenv("TRADE_SYMBOL", "XAUUSDT")])[0]
             try:
-                self.send_json({"ok": True, "signal": cached_auto_signal(normalize_symbol(symbol))})
+                clean_symbol = normalize_symbol(symbol)
+                signal_info = cached_auto_signal(clean_symbol)
+                trigger_ok, trigger_reason = score_trigger_ok(signal_info)
+                can_enter_ok, can_enter_reason = can_auto_enter(clean_symbol)
+                self.send_json(
+                    {
+                        "ok": True,
+                        "signal": signal_info,
+                        "diagnostic": {
+                            "symbol": clean_symbol,
+                            "trigger_ok": trigger_ok,
+                            "trigger_reason": trigger_reason,
+                            "can_enter": can_enter_ok,
+                            "can_enter_reason": can_enter_reason,
+                            "auto_trade_enabled": env_bool("AUTO_TRADE_ENABLED", "false"),
+                            "auto_scalping_enabled": auto_scalping_enabled(),
+                        },
+                    }
+                )
             except Exception as error:
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return

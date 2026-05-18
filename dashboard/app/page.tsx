@@ -449,6 +449,8 @@ export default function Home() {
         throw new Error(body.error || "Backend belum bisa membaca daftar scalping.");
       }
       setSignalSymbols(body.symbols);
+      setSelectedSymbol((prev) => (body.symbols?.includes(prev) ? prev : body.symbols?.[0] || prev));
+      setActiveChartSymbol((prev) => prev || body.symbols?.[0] || null);
     } catch {
       setSignalSymbols(fallbackSignalSymbols);
     }
