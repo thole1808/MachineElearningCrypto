@@ -24,6 +24,7 @@ TRADE_MEMORY: dict[str, dict[str, int]] = {}
 SIGNAL_NOTIFY_MEMORY: dict[str, int] = {}
 AUTO_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": []}
 SIGNAL_CACHE: dict[str, dict[str, object]] = {}
+FUTURES_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": set()}
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -67,6 +68,7 @@ def auto_scalping_symbols() -> list[str]:
         return [str(symbol) for symbol in cached_symbols]
 
     client = BinanceClient(symbol=os.getenv("TRADE_SYMBOL", "BTCUSDT"))
+    valid_symbols = valid_futures_symbols(client)
     rows = client.public_get("/fapi/v1/ticker/24hr")
     if not isinstance(rows, list):
         return [normalize_symbol(os.getenv("TRADE_SYMBOL", "BTCUSDT"))]
@@ -83,6 +85,8 @@ def auto_scalping_symbols() -> list[str]:
     for row in rows:
         symbol = str(row.get("symbol", "")).upper()
         if not symbol.endswith("USDT") or symbol in blacklist:
+            continue
+        if valid_symbols and symbol not in valid_symbols:
             continue
         try:
             quote_volume = Decimal(str(row.get("quoteVolume", "0")))
@@ -102,6 +106,30 @@ def auto_scalping_symbols() -> list[str]:
         symbols = [normalize_symbol(os.getenv("TRADE_SYMBOL", "BTCUSDT"))]
     AUTO_SYMBOL_MEMORY["ts"] = now
     AUTO_SYMBOL_MEMORY["symbols"] = symbols
+    return symbols
+
+
+def valid_futures_symbols(client: "BinanceClient") -> set[str]:
+    now = int(time.time())
+    cached_symbols = FUTURES_SYMBOL_MEMORY.get("symbols")
+    cached_ts = int(FUTURES_SYMBOL_MEMORY.get("ts", 0))
+    if isinstance(cached_symbols, set) and cached_symbols and now - cached_ts < 3600:
+        return cached_symbols
+    try:
+        info = client.public_get("/fapi/v1/exchangeInfo")
+    except Exception as error:
+        print(f"[SYMBOL FILTER ERROR] {error}")
+        return set()
+    symbols: set[str] = set()
+    for item in info.get("symbols", []) if isinstance(info, dict) else []:
+        symbol = str(item.get("symbol", "")).upper()
+        status = str(item.get("status", "")).upper()
+        contract_type = str(item.get("contractType", "")).upper()
+        quote_asset = str(item.get("quoteAsset", "")).upper()
+        if symbol and status == "TRADING" and quote_asset == "USDT" and contract_type in {"PERPETUAL", ""}:
+            symbols.add(symbol)
+    FUTURES_SYMBOL_MEMORY["ts"] = now
+    FUTURES_SYMBOL_MEMORY["symbols"] = symbols
     return symbols
 
 
@@ -358,8 +386,18 @@ def effective_order_usdt(symbol: str, amount: Decimal) -> Decimal:
     clean_symbol = normalize_symbol(symbol)
     if clean_symbol in {"XAUUSDT", "XAUUSD"}:
         minimum = Decimal(os.getenv("GOLD_MIN_ORDER_USDT", "5"))
-        return max(amount, minimum)
-    return amount
+        amount = max(amount, minimum)
+    configured_balance = os.getenv("ACCOUNT_BALANCE_USDT", "").strip()
+    if not configured_balance:
+        balance_idr = os.getenv("ACCOUNT_BALANCE_IDR", "").strip()
+        usdt_idr_rate = os.getenv("USDT_IDR_RATE", "").strip()
+        if balance_idr and usdt_idr_rate:
+            configured_balance = str(Decimal(balance_idr) / Decimal(usdt_idr_rate))
+    max_order_percent = Decimal(os.getenv("MAX_ORDER_BALANCE_PERCENT", "0"))
+    if configured_balance and max_order_percent > 0:
+        max_amount = Decimal(configured_balance) * max_order_percent / Decimal("100")
+        amount = min(amount, max_amount)
+    return amount.quantize(Decimal("0.01"))
 
 
 class BinanceClient:
@@ -572,7 +610,11 @@ class BinanceClient:
         try:
             payload = self.public_get("/fapi/v1/ticker/price" if self.is_futures() else "/api/v3/ticker/price", {"symbol": symbol})
         except Exception:
-            payload = self.public_get_url("https://api.binance.com", "/api/v3/ticker/price", {"symbol": symbol})
+            try:
+                payload = self.public_get_url("https://api.binance.com", "/api/v3/ticker/price", {"symbol": symbol})
+            except Exception as error:
+                print(f"[ASSET PRICE SKIP] {clean_asset}: {error}")
+                return Decimal("0")
         return Decimal(str(payload["price"]))
 
     def usdt_idr_rate(self) -> Decimal | None:
@@ -594,6 +636,14 @@ class BinanceClient:
         for balance in balances:
             asset = str(balance.get("asset", "")).upper()
             price = self.asset_usdt_price(asset)
+            if price <= 0 and asset not in {"USDT", "FDUSD", "USDC"}:
+                balance["priceError"] = f"{asset}USDT tidak tersedia"
+                balance["usdtPrice"] = "0"
+                balance["walletUsdt"] = "0"
+                balance["availableUsdt"] = "0"
+                balance["marginUsdt"] = "0"
+                balance["unrealizedUsdt"] = "0"
+                continue
             balance_wallet_usdt = Decimal(str(balance.get("walletBalance", "0"))) * price
             balance_available_usdt = Decimal(str(balance.get("availableBalance", "0"))) * price
             balance_margin_usdt = Decimal(str(balance.get("marginBalance", "0"))) * price
@@ -619,6 +669,33 @@ class BinanceClient:
             "unrealized_usdt": str(unrealized_usdt),
             "usdt_idr_rate": str(idr_rate) if idr_rate else None,
         }
+        if idr_rate:
+            summary.update(
+                {
+                    "wallet_idr": str(wallet_usdt * idr_rate),
+                    "available_idr": str(available_usdt * idr_rate),
+                    "margin_idr": str(margin_usdt * idr_rate),
+                    "unrealized_idr": str(unrealized_usdt * idr_rate),
+                }
+            )
+        return summary
+
+    def futures_account_summary(self, account: dict, balances: list[dict]) -> dict:
+        summary = self.futures_balance_summary(balances)
+        idr_rate = self.usdt_idr_rate()
+        wallet_usdt = Decimal(str(account.get("totalWalletBalance", summary.get("wallet_usdt", "0"))))
+        available_usdt = Decimal(str(account.get("availableBalance", summary.get("available_usdt", "0"))))
+        margin_usdt = Decimal(str(account.get("totalMarginBalance", summary.get("margin_usdt", "0"))))
+        unrealized_usdt = Decimal(str(account.get("totalUnrealizedProfit", summary.get("unrealized_usdt", "0"))))
+        summary.update(
+            {
+                "wallet_usdt": str(wallet_usdt),
+                "available_usdt": str(available_usdt),
+                "margin_usdt": str(margin_usdt),
+                "unrealized_usdt": str(unrealized_usdt),
+                "usdt_idr_rate": str(idr_rate) if idr_rate else summary.get("usdt_idr_rate"),
+            }
+        )
         if idr_rate:
             summary.update(
                 {
@@ -737,27 +814,34 @@ class BinanceClient:
             {"symbol": self.symbol},
         )
         if self.has_signed_credentials():
-            account = self.signed_get("/fapi/v2/account" if self.is_futures() else "/api/v3/account")
-            if self.is_futures():
-                balances = [
-                    asset
-                    for asset in account.get("assets", [])
-                    if float(asset.get("walletBalance", "0")) > 0 or float(asset.get("availableBalance", "0")) > 0
-                ]
-                result["balances"] = balances
-                result["balance_summary"] = self.futures_balance_summary(balances)
-                result["open_positions"] = self.open_positions()
-            else:
-                result["balances"] = [
-                    bal
-                    for bal in account.get("balances", [])
-                    if float(bal.get("free", "0")) > 0 or float(bal.get("locked", "0")) > 0
-                ]
+            try:
+                account = self.signed_get("/fapi/v2/account" if self.is_futures() else "/api/v3/account")
+                if self.is_futures():
+                    balances = [
+                        asset
+                        for asset in account.get("assets", [])
+                        if (
+                            abs(float(asset.get("walletBalance", "0"))) > 0
+                            or abs(float(asset.get("marginBalance", "0"))) > 0
+                            or abs(float(asset.get("unrealizedProfit", "0"))) > 0
+                        )
+                    ]
+                    result["balances"] = balances
+                    result["balance_summary"] = self.futures_account_summary(account, balances)
+                    result["open_positions"] = self.open_positions()
+                else:
+                    result["balances"] = [
+                        bal
+                        for bal in account.get("balances", [])
+                        if float(bal.get("free", "0")) > 0 or float(bal.get("locked", "0")) > 0
+                    ]
+            except Exception as error:
+                result["account_error"] = str(error)
+                result["balances"] = []
+                result["open_positions"] = []
         return result
 
     def open_positions(self) -> list[dict]:
-        if self.dry_run():
-            return []
         rows = self.signed_get("/fapi/v2/positionRisk")
         positions = [pos for pos in rows if abs(float(pos.get("positionAmt", "0"))) > 0]
         for position in positions:
@@ -1121,6 +1205,122 @@ def volume_ok(volumes: list[Decimal]) -> bool:
     return last_volume >= avg_volume * multiplier
 
 
+def pivot_highs(values: list[Decimal], left: int, right: int) -> list[tuple[int, Decimal]]:
+    pivots: list[tuple[int, Decimal]] = []
+    if len(values) < left + right + 1:
+        return pivots
+    for index in range(left, len(values) - right):
+        level = values[index]
+        window = values[index - left:index + right + 1]
+        if level == max(window) and window.count(level) == 1:
+            pivots.append((index, level))
+    return pivots
+
+
+def pivot_lows(values: list[Decimal], left: int, right: int) -> list[tuple[int, Decimal]]:
+    pivots: list[tuple[int, Decimal]] = []
+    if len(values) < left + right + 1:
+        return pivots
+    for index in range(left, len(values) - right):
+        level = values[index]
+        window = values[index - left:index + right + 1]
+        if level == min(window) and window.count(level) == 1:
+            pivots.append((index, level))
+    return pivots
+
+
+def market_structure_signal(candles: list[dict], lookback: int) -> dict:
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    if len(closes) < lookback * 2 + 3:
+        return {"side": None, "tag": None, "level": None}
+
+    high_pivots = pivot_highs(highs, lookback, lookback)
+    low_pivots = pivot_lows(lows, lookback, lookback)
+    previous_close = closes[-2]
+    last_close = closes[-1]
+    side = None
+    tag = None
+    level = None
+
+    if high_pivots:
+        last_high_index, last_high = high_pivots[-1]
+        if last_high_index < len(closes) - 1 and previous_close <= last_high < last_close:
+            side = "BUY"
+            level = last_high
+            if len(low_pivots) >= 2:
+                tag = "CHoCH+" if low_pivots[-1][1] > low_pivots[-2][1] else "CHoCH"
+            else:
+                tag = "BOS"
+
+    if low_pivots:
+        last_low_index, last_low = low_pivots[-1]
+        if last_low_index < len(closes) - 1 and previous_close >= last_low > last_close:
+            side = "SELL"
+            level = last_low
+            if len(high_pivots) >= 2:
+                tag = "CHoCH+" if high_pivots[-1][1] < high_pivots[-2][1] else "CHoCH"
+            else:
+                tag = "BOS"
+
+    return {"side": side, "tag": tag, "level": str(level) if level is not None else None}
+
+
+def latest_fvg_signal(candles: list[dict]) -> dict:
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    opens = to_decimal_list([item["open"] for item in candles])
+    if len(candles) < 4:
+        return {"side": None, "gap": None}
+
+    index = len(candles) - 1
+    max_width = Decimal(os.getenv("PAC_FVG_MAX_WIDTH_PERCENT", "2"))
+    recent_range = max(highs[-100:]) - min(lows[-100:]) if len(highs) >= 100 else max(highs) - min(lows)
+    min_gap = recent_range * max(max_width, Decimal("0.1")) / Decimal("100")
+
+    if opens[index] > closes[index] and lows[index - 2] > highs[index]:
+        gap_size = lows[index - 2] - highs[index]
+        if gap_size >= min_gap:
+            return {"side": "SELL", "gap": str(gap_size)}
+    if lows[index] > highs[index - 2]:
+        gap_size = lows[index] - highs[index - 2]
+        if gap_size >= min_gap:
+            return {"side": "BUY", "gap": str(gap_size)}
+    return {"side": None, "gap": None}
+
+
+def reversal_band_signal(candles: list[dict], atr_values: list[Decimal]) -> dict:
+    closes = to_decimal_list([item["close"] for item in candles])
+    if len(closes) < 31 or not atr_values:
+        return {"side": None}
+    length = int(os.getenv("PAC_REVERSAL_BANDS_LENGTH", "30"))
+    basis = average(closes[-length:])
+    span = atr_values[-1]
+    last_close = closes[-1]
+    upper_1 = basis + span * Decimal("3")
+    lower_1 = basis - span * Decimal("3")
+    if last_close <= lower_1:
+        return {"side": "BUY", "zone": "lower"}
+    if last_close >= upper_1:
+        return {"side": "SELL", "zone": "upper"}
+    return {"side": None}
+
+
+def price_action_concepts(candles: list[dict], atr_values: list[Decimal]) -> dict:
+    internal = market_structure_signal(candles, int(os.getenv("PAC_INTERNAL_LOOKBACK", "5")))
+    swing = market_structure_signal(candles, int(os.getenv("PAC_SWING_LOOKBACK", "50")))
+    fvg = latest_fvg_signal(candles)
+    reversal = reversal_band_signal(candles, atr_values)
+    return {
+        "internal": internal,
+        "swing": swing,
+        "fvg": fvg,
+        "reversal": reversal,
+    }
+
+
 def order_book_confirmation(client: BinanceClient, side: str) -> tuple[bool, dict, str]:
     if not env_bool("USE_ORDER_BOOK_CONFIRMATION", "true"):
         return True, {}, "order book filter off"
@@ -1196,6 +1396,7 @@ def generate_auto_signal(symbol: str) -> dict:
         atr_values = atr(candles, int(os.getenv("ATR_PERIOD", "14")))
         atr_now = atr_values[-1]
         atr_avg = average([value for value in atr_values[-21:] if value > 0])
+        pac = price_action_concepts(candles, atr_values) if env_bool("ENABLE_PRICE_ACTION_CONCEPTS", "true") else {}
         volatility_ok = atr_avg == 0 or (
             atr_now >= atr_avg * Decimal(os.getenv("ATR_MIN_MULTIPLIER", "0.75"))
             and atr_now <= atr_avg * Decimal(os.getenv("ATR_MAX_MULTIPLIER", "1.8"))
@@ -1247,6 +1448,43 @@ def generate_auto_signal(symbol: str) -> dict:
             sell_score += 1
             buy_reasons.append("volume valid")
             sell_reasons.append("volume valid")
+        if pac:
+            internal = pac.get("internal", {})
+            swing = pac.get("swing", {})
+            fvg = pac.get("fvg", {})
+            reversal = pac.get("reversal", {})
+            internal_weight = int(os.getenv("PAC_INTERNAL_STRUCTURE_WEIGHT", "2"))
+            swing_weight = int(os.getenv("PAC_SWING_STRUCTURE_WEIGHT", "3"))
+            fvg_weight = int(os.getenv("PAC_FVG_WEIGHT", "1"))
+            reversal_weight = int(os.getenv("PAC_REVERSAL_BAND_WEIGHT", "1"))
+
+            if internal.get("side") == "BUY":
+                buy_score += internal_weight
+                buy_reasons.append(f"internal {internal.get('tag')}")
+            elif internal.get("side") == "SELL":
+                sell_score += internal_weight
+                sell_reasons.append(f"internal {internal.get('tag')}")
+
+            if swing.get("side") == "BUY":
+                buy_score += swing_weight
+                buy_reasons.append(f"swing {swing.get('tag')}")
+            elif swing.get("side") == "SELL":
+                sell_score += swing_weight
+                sell_reasons.append(f"swing {swing.get('tag')}")
+
+            if fvg.get("side") == "BUY":
+                buy_score += fvg_weight
+                buy_reasons.append("bullish FVG")
+            elif fvg.get("side") == "SELL":
+                sell_score += fvg_weight
+                sell_reasons.append("bearish FVG")
+
+            if reversal.get("side") == "BUY":
+                buy_score += reversal_weight
+                buy_reasons.append("reversal lower band")
+            elif reversal.get("side") == "SELL":
+                sell_score += reversal_weight
+                sell_reasons.append("reversal upper band")
         if not volatility_ok:
             buy_score -= 2
             sell_score -= 2
@@ -1291,6 +1529,7 @@ def generate_auto_signal(symbol: str) -> dict:
             "trend_interval": trend_interval,
             "trend_rsi": str(trend_rsi.quantize(Decimal("0.01"))),
             "atr": str(atr_now),
+            "price_action_concepts": pac,
             "order_book": book,
             "order_book_reason": book_reason,
         }

@@ -62,6 +62,7 @@ type BinanceStatus = {
   balances?: Balance[];
   balance_summary?: BalanceSummary;
   open_positions?: OpenPosition[];
+  account_error?: string;
 };
 
 type ApiResponse = {
@@ -172,8 +173,10 @@ function signalScore(signal?: AutoSignal | null) {
 
 function formatUsd(value?: string) {
   if (!value) return "-";
-  return `${Math.round(Number(value)).toLocaleString("en-US", {
-    maximumFractionDigits: 0,
+  const number = Number(value);
+  return `${number.toLocaleString("en-US", {
+    minimumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 10 ? 4 : 2,
+    maximumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 10 ? 4 : 2,
   })} USDT`;
 }
 
@@ -432,11 +435,19 @@ export default function Home() {
 
   const openPositions = status?.open_positions || [];
   const futuresBalances = status?.balances || [];
+  const visibleFuturesBalances = futuresBalances.filter((balance) => {
+    const wallet = Number(balance.walletUsdt ?? balance.walletBalance ?? 0);
+    const margin = Number(balance.marginUsdt ?? balance.marginBalance ?? 0);
+    const unrealized = Number(balance.unrealizedUsdt ?? balance.unrealizedProfit ?? 0);
+    return Math.abs(wallet) > 0 || Math.abs(margin) > 0 || Math.abs(unrealized) > 0;
+  });
   const balanceSummary = status?.balance_summary;
-  const totalUnrealizedPnl = openPositions.reduce(
+  const accountError = status?.account_error;
+  const positionUnrealizedPnl = openPositions.reduce(
     (total, position) => total + Number(position.unRealizedProfit ?? position.unrealizedProfit ?? 0),
     0,
   );
+  const totalUnrealizedPnl = Number(balanceSummary?.unrealized_usdt ?? positionUnrealizedPnl);
   const showIdr = balanceCurrency === "IDR";
   const formatBalance = useCallback((usdtValue?: string, idrValue?: string) => {
     if (hideBalance) return "***";
@@ -629,7 +640,10 @@ export default function Home() {
               ))}
             </div>
           </header>
-          {futuresBalances.length ? (
+          {accountError ? (
+            <div className="alert compact">Account private belum terbaca: {accountError}</div>
+          ) : null}
+          {visibleFuturesBalances.length ? (
             <div className="balance-table">
               <div className="balance-row balance-head">
                 <span>Asset</span>
@@ -637,7 +651,7 @@ export default function Home() {
                 <span>Avail.</span>
                 <span>U-PnL</span>
               </div>
-              {futuresBalances.map((balance) => {
+              {visibleFuturesBalances.map((balance) => {
                 const unrealizedValue = balance.unrealizedUsdt || balance.unrealizedProfit || "0";
                 return (
                   <div className="balance-row" key={balance.asset}>
@@ -650,7 +664,7 @@ export default function Home() {
               })}
             </div>
           ) : (
-            <p className="empty">Saldo Futures belum terbaca.</p>
+            <p className="empty">{accountError ? "Cek API key, private key RSA, permission Futures, atau IP restriction." : "Saldo Futures belum terbaca."}</p>
           )}
         </section>
 
