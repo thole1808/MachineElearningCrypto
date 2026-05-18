@@ -2348,7 +2348,7 @@ class BotHandler(SimpleHTTPRequestHandler):
         self.send_json({"reply": reply})
 
     def send_json(self, payload: dict, status: int = 200) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))

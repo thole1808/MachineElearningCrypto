@@ -301,13 +301,22 @@ export default function Home() {
       if (!response.ok || !body.ok || !body.signals) {
         throw new Error(body.error || "Backend belum bisa membaca signal Binance.");
       }
+      const failedSignals = body.signals
+        .filter((item) => !item.ok || item.error)
+        .map((item) => `${item.symbol || "PAIR"}: ${item.error || "gagal membaca signal"}`);
       const signals = body.signals
         .map((item) => item.signal)
         .filter((item): item is AutoSignal => Boolean(item))
         .sort((left, right) => signalScore(right) - signalScore(left));
       setAutoSignals(signals);
       setAutoSignal(signals.find((item) => item.symbol === selectedSymbol) || signals[0] || null);
-      setSignalError("");
+      setSignalError(
+        failedSignals.length
+          ? failedSignals.slice(0, 3).join(" | ")
+          : signals.length
+            ? ""
+            : "Backend tidak mengirim data signal untuk pair yang discan. Cek log backend atau restart ./start-web.sh.",
+      );
     } catch (caught) {
       setSignalError(caught instanceof Error ? caught.message : "Terjadi error saat membaca signal.");
     }
