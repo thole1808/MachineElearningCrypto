@@ -19,6 +19,7 @@ from app import (
     score_trigger_ok,
     send_telegram,
     trade_pnl_summary,
+    start_ws_manager,
 )
 
 
@@ -138,6 +139,7 @@ def maybe_enter(symbol: str) -> None:
 
 def main() -> None:
     load_dotenv()
+    start_ws_manager()
     load_trade_memory()
     symbol = os.getenv("TRADE_SYMBOL", "XAUUSDT").strip().upper()
     interval = int(os.getenv("GOLD_BOT_INTERVAL", os.getenv("SCALPING_INTERVAL", "20")))

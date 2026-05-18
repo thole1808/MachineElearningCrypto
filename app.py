@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -14,6 +15,7 @@ import urllib.request
 from decimal import Decimal, ROUND_DOWN
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import websockets
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
@@ -25,7 +27,29 @@ SIGNAL_NOTIFY_MEMORY: dict[str, int] = {}
 AUTO_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": []}
 SIGNAL_CACHE: dict[str, dict[str, object]] = {}
 FUTURES_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": set()}
-POSITION_PROFIT_MEMORY: dict[str, Decimal] = {}
+PROFIT_MEMORY_FILE = DATA_DIR / "position_profit_memory.json"
+
+def load_position_profit_memory() -> dict[str, Decimal]:
+    try:
+        if PROFIT_MEMORY_FILE.exists():
+            with open(PROFIT_MEMORY_FILE, "r") as f:
+                data = json.load(f)
+                return {k: Decimal(str(v)) for k, v in data.items()}
+    except Exception as e:
+        print(f"[PROFIT MEMORY] Gagal load profit memory: {e}")
+    return {}
+
+def save_position_profit_memory(mem: dict[str, Decimal]) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        serializable = {k: float(v) for k, v in mem.items()}
+        with open(PROFIT_MEMORY_FILE, "w") as f:
+            json.dump(serializable, f, indent=2)
+    except Exception as e:
+        print(f"[PROFIT MEMORY] Gagal save profit memory: {e}")
+
+POSITION_PROFIT_MEMORY: dict[str, Decimal] = load_position_profit_memory()
+BINANCE_WS_MANAGER: BinanceWebSocketManager | None = None
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -545,7 +569,7 @@ class BinanceClient:
         symbols.sort(key=lambda item: (item["quote_asset"] != "USDT", item["symbol"]))
         return {"mode": self.mode, "count": len(symbols), "symbols": symbols}
 
-    def klines(self, interval: str = "1m", limit: int = 120) -> dict:
+    def klines_rest(self, interval: str = "1m", limit: int = 120) -> dict:
         allowed_intervals = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"}
         if interval not in allowed_intervals:
             raise ValueError("Interval candle tidak didukung.")
@@ -568,7 +592,14 @@ class BinanceClient:
         ]
         return {"symbol": self.symbol, "interval": interval, "candles": candles}
 
-    def order_book(self, limit: int = 20) -> dict:
+    def klines(self, interval: str = "1m", limit: int = 120) -> dict:
+        if BINANCE_WS_MANAGER and BINANCE_WS_MANAGER.running:
+            cached = BINANCE_WS_MANAGER.get_cached_klines(self.symbol, interval, limit)
+            if cached is not None:
+                return cached
+        return self.klines_rest(interval, limit)
+
+    def order_book_rest(self, limit: int = 20) -> dict:
         safe_limit = max(5, min(limit, 100))
         rows = self.public_get(
             "/fapi/v1/depth" if self.is_futures() else "/api/v3/depth",
@@ -598,10 +629,24 @@ class BinanceClient:
             "spread_percent": str(spread_percent),
         }
 
-    def get_price(self) -> Decimal:
+    def order_book(self, limit: int = 20) -> dict:
+        if BINANCE_WS_MANAGER and BINANCE_WS_MANAGER.running:
+            cached = BINANCE_WS_MANAGER.get_cached_order_book(self.symbol)
+            if cached is not None:
+                return cached
+        return self.order_book_rest(limit)
+
+    def get_price_rest(self) -> Decimal:
         path = "/fapi/v1/ticker/price" if self.is_futures() else "/api/v3/ticker/price"
         payload = self.public_get(path, {"symbol": self.symbol})
         return Decimal(str(payload["price"]))
+
+    def get_price(self) -> Decimal:
+        if BINANCE_WS_MANAGER and BINANCE_WS_MANAGER.running:
+            cached = BINANCE_WS_MANAGER.get_cached_price(self.symbol)
+            if cached is not None:
+                return cached
+        return self.get_price_rest()
 
     def asset_usdt_price(self, asset: str) -> Decimal:
         clean_asset = asset.strip().upper()
@@ -796,7 +841,7 @@ class BinanceClient:
             )
         return rounded
 
-    def status(self) -> dict:
+    def status_rest(self) -> dict:
         result = {
             "mode": self.mode,
             "market_type": "futures" if self.is_futures() else "spot",
@@ -842,7 +887,19 @@ class BinanceClient:
                 result["open_positions"] = []
         return result
 
-    def open_positions(self) -> list[dict]:
+    def status(self) -> dict:
+        if BINANCE_WS_MANAGER and BINANCE_WS_MANAGER.running:
+            cached = BINANCE_WS_MANAGER.get_cached_status()
+            if cached is not None:
+                res = dict(cached)
+                res["symbol"] = self.symbol
+                res["price"] = {"symbol": self.symbol, "price": str(self.get_price())}
+                res["open_positions"] = self.open_positions()
+                res["server_time"] = {"serverTime": int(time.time() * 1000)}
+                return res
+        return self.status_rest()
+
+    def open_positions_rest(self) -> list[dict]:
         rows = self.signed_get("/fapi/v2/positionRisk")
         positions = [pos for pos in rows if abs(float(pos.get("positionAmt", "0"))) > 0]
         for position in positions:
@@ -873,6 +930,35 @@ class BinanceClient:
                 position["roePercent"] = str((unrealized_profit / initial_margin) * Decimal("100"))
         return positions
 
+    def open_positions(self) -> list[dict]:
+        if BINANCE_WS_MANAGER and BINANCE_WS_MANAGER.running:
+            cached = BINANCE_WS_MANAGER.get_cached_open_positions()
+            if cached is not None:
+                positions_copy = []
+                for p in cached:
+                    pos = dict(p)
+                    latest_price = BINANCE_WS_MANAGER.get_cached_price(pos.get("symbol", ""))
+                    if latest_price is not None:
+                        pos["markPrice"] = str(latest_price)
+                    entry = Decimal(str(pos.get("entryPrice", "0")))
+                    mark = Decimal(str(pos.get("markPrice", "0")))
+                    amount = Decimal(str(pos.get("positionAmt", "0")))
+                    if entry > 0 and mark > 0:
+                        if amount > 0:
+                            pnl_percent = ((mark - entry) / entry) * Decimal("100")
+                        else:
+                            pnl_percent = ((entry - mark) / entry) * Decimal("100")
+                        pos["pnlPercent"] = str(pnl_percent)
+                        leverage = Decimal(str(pos.get("leverage", os.getenv("DEFAULT_LEVERAGE", "1"))))
+                        unrealized_profit = Decimal(str(pos.get("unRealizedProfit", pos.get("unrealizedProfit", "0"))))
+                        notional = abs(Decimal(str(pos.get("notional", "0"))))
+                        if notional > 0 and leverage > 0:
+                            initial_margin = notional / leverage
+                            pos["roePercent"] = str((unrealized_profit / initial_margin) * Decimal("100"))
+                    positions_copy.append(pos)
+                return positions_copy
+        return self.open_positions_rest()
+
     def has_open_position(self) -> bool:
         for position in self.open_positions():
             if position.get("symbol") == self.symbol and abs(float(position.get("positionAmt", "0"))) > 0:
@@ -885,7 +971,7 @@ class BinanceClient:
             return False
         return len(self.open_positions()) >= max_positions
 
-    def open_orders(self, symbol: str | None = None) -> list[dict]:
+    def open_orders_rest(self, symbol: str | None = None) -> list[dict]:
         if self.dry_run():
             return []
         target_symbol = normalize_symbol(symbol or self.symbol)
@@ -893,6 +979,14 @@ class BinanceClient:
         if isinstance(rows, list):
             return rows
         return []
+
+    def open_orders(self, symbol: str | None = None) -> list[dict]:
+        if BINANCE_WS_MANAGER and BINANCE_WS_MANAGER.running:
+            target = symbol or self.symbol
+            cached = BINANCE_WS_MANAGER.get_cached_open_orders(target)
+            if cached is not None:
+                return cached
+        return self.open_orders_rest(symbol)
 
     def cancel_order(self, symbol: str, order_id: str | int) -> dict:
         if self.dry_run():
@@ -1896,8 +1990,12 @@ def monitor_open_positions(symbols: list[str]) -> int:
             side_label = "LONG" if position_amount > 0 else "SHORT"
             profit_key = f"{position_symbol}:{side_label}"
             active_keys.add(profit_key)
+            
             peak_profit = max(POSITION_PROFIT_MEMORY.get(profit_key, pnl_usdt), pnl_usdt)
-            POSITION_PROFIT_MEMORY[profit_key] = peak_profit
+            if profit_key not in POSITION_PROFIT_MEMORY or peak_profit > POSITION_PROFIT_MEMORY[profit_key]:
+                POSITION_PROFIT_MEMORY[profit_key] = peak_profit
+                save_position_profit_memory(POSITION_PROFIT_MEMORY)
+                
             update_time_ms = int(position.get("updateTime", "0") or "0")
             hold_seconds = int(time.time() - (update_time_ms / 1000)) if update_time_ms > 0 else max_hold_seconds
 
@@ -1950,6 +2048,7 @@ def monitor_open_positions(symbols: list[str]) -> int:
                 )
                 close_result = close_client.close_position_amount(position_amount)
                 POSITION_PROFIT_MEMORY.pop(profit_key, None)
+                save_position_profit_memory(POSITION_PROFIT_MEMORY)
                 print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
                 send_telegram(
                     f"<b>FORCE CLOSE {close_reason}</b>\n"
@@ -1962,9 +2061,13 @@ def monitor_open_positions(symbols: list[str]) -> int:
         except Exception as close_error:
             print(f"[FORCE CLOSE ERROR] {close_error}")
 
+    memory_changed = False
     for key in list(POSITION_PROFIT_MEMORY):
         if key not in active_keys:
             POSITION_PROFIT_MEMORY.pop(key, None)
+            memory_changed = True
+    if memory_changed:
+        save_position_profit_memory(POSITION_PROFIT_MEMORY)
     return open_count
 
 
@@ -2356,8 +2459,389 @@ class BotHandler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class BinanceWebSocketManager:
+    def __init__(self):
+        self.loop = None
+        self.public_ws = None
+        self.private_ws = None
+        self.listen_key = None
+        self.symbols = set()
+        self.running = False
+        self.lock = threading.Lock()
+        
+        # Caches
+        self.prices = {}
+        self.klines = {}
+        self.order_books = {}
+        self.positions = None
+        self.cached_status = None
+        self.open_orders = {}
+
+    def get_ws_base_url(self) -> str:
+        client = BinanceClient()
+        if client.is_futures():
+            return "wss://fstream.binance.com" if client.mode == "live" else "wss://testnet.binancefuture.com"
+        return "wss://stream.binance.com:9443" if client.mode == "live" else "wss://testnet.binance.vision"
+
+    def fetch_listen_key(self) -> str:
+        client = BinanceClient()
+        url = f"{client.base_url}/fapi/v1/listenKey" if client.is_futures() else f"{client.base_url}/api/v3/listenKey"
+        req = urllib.request.Request(url, method="POST")
+        req.add_header("X-MBX-APIKEY", client.api_key)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["listenKey"]
+        except Exception as err:
+            print(f"[WS LISTEN KEY ERROR] Gagal mengambil listenKey: {err}")
+            raise
+
+    def keep_alive_listen_key(self, listen_key: str) -> None:
+        client = BinanceClient()
+        url = f"{client.base_url}/fapi/v1/listenKey" if client.is_futures() else f"{client.base_url}/api/v3/listenKey"
+        url_with_param = f"{url}?listenKey={listen_key}"
+        req = urllib.request.Request(url_with_param, method="PUT")
+        req.add_header("X-MBX-APIKEY", client.api_key)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                pass
+        except Exception as err:
+            print(f"[WS LISTEN KEY ERROR] Gagal keep alive listenKey: {err}")
+
+    def build_public_ws_url(self, symbols: list[str]) -> str:
+        base = self.get_ws_base_url()
+        scalping_tf = os.getenv("SCALPING_TIMEFRAME", "5m").strip().lower()
+        trend_tf = os.getenv("TREND_TIMEFRAME", "15m").strip().lower()
+        timeframes = {scalping_tf, trend_tf}
+        
+        streams = []
+        for symbol in symbols:
+            s_lower = symbol.lower()
+            streams.append(f"{s_lower}@miniTicker")
+            streams.append(f"{s_lower}@depth20@100ms")
+            for tf in timeframes:
+                streams.append(f"{s_lower}@kline_{tf}")
+                
+        streams_str = "/".join(streams)
+        return f"{base}/stream?streams={streams_str}"
+
+    async def start(self):
+        self.running = True
+        self.loop = asyncio.get_running_loop()
+        
+        # Load initial symbols
+        initial_symbols = await asyncio.to_thread(configured_scalping_symbols)
+        initial_set = set(initial_symbols)
+        try:
+            client = BinanceClient()
+            if client.has_signed_credentials():
+                positions = await asyncio.to_thread(client.open_positions_rest)
+                for p in positions:
+                    sym = p.get("symbol")
+                    if sym:
+                        initial_set.add(sym.upper())
+        except Exception as e:
+            print(f"[WS START WARNING] Gagal load open positions untuk initial symbols: {e}")
+            
+        with self.lock:
+            self.symbols = initial_set
+            
+        tasks = [
+            asyncio.create_task(self.public_ws_loop()),
+            asyncio.create_task(self.private_ws_loop()),
+            asyncio.create_task(self.keep_alive_loop()),
+            asyncio.create_task(self.symbol_monitor_loop())
+        ]
+        
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def keep_alive_loop(self):
+        while self.running:
+            await asyncio.sleep(1800)  # 30 menit
+            if self.listen_key:
+                try:
+                    await asyncio.to_thread(self.keep_alive_listen_key, self.listen_key)
+                    print("[WS KEEP-ALIVE] ListenKey diperpanjang sukses.")
+                except Exception as e:
+                    print(f"[WS KEEP-ALIVE ERROR] Gagal keep alive: {e}")
+
+    async def symbol_monitor_loop(self):
+        while self.running:
+            await asyncio.sleep(15)
+            try:
+                current_symbols = set(await asyncio.to_thread(configured_scalping_symbols))
+                try:
+                    client = BinanceClient()
+                    if client.has_signed_credentials():
+                        open_pos = self.get_cached_open_positions()
+                        if open_pos is None:
+                            open_pos = await asyncio.to_thread(client.open_positions_rest)
+                        for p in open_pos:
+                            sym = p.get("symbol")
+                            if sym:
+                                current_symbols.add(sym.upper())
+                except Exception as ex:
+                    print(f"[WS MONITOR WARNING] Gagal ambil open positions untuk dynamic symbols: {ex}")
+                    
+                if current_symbols and current_symbols != self.symbols:
+                    print(f"[WS SYMBOLS CHANGED] Ganti symbols dari {self.symbols} ke {current_symbols}. Reconnecting WebSocket...")
+                    with self.lock:
+                        self.symbols = current_symbols
+                    if self.public_ws:
+                        await self.public_ws.close()
+            except Exception as e:
+                print(f"[WS MONITOR ERROR] {e}")
+
+    async def public_ws_loop(self):
+        while self.running:
+            with self.lock:
+                symbols = list(self.symbols)
+            if not symbols:
+                await asyncio.sleep(2)
+                continue
+                
+            url = self.build_public_ws_url(symbols)
+            print(f"[WS PUBLIC] Koneksi ke combined streams: {url}")
+            try:
+                async with websockets.connect(url) as ws:
+                    self.public_ws = ws
+                    print("[WS PUBLIC] WebSocket Combined Terkoneksi!")
+                    async for raw_msg in ws:
+                        msg = json.loads(raw_msg)
+                        stream = msg.get("stream", "")
+                        data = msg.get("data", {})
+                        event_type = data.get("e", "")
+                        symbol = data.get("s", "").upper()
+                        
+                        if event_type == "kline":
+                            kline_data = data.get("k", {})
+                            self.handle_ws_kline(symbol, kline_data)
+                        elif event_type == "24hrMiniTicker":
+                            close_price = data.get("c", "0")
+                            with self.lock:
+                                self.prices[symbol] = Decimal(str(close_price))
+                        elif "depth" in stream:
+                            self.process_ws_depth(symbol, data)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[WS PUBLIC ERROR] Koneksi terputus: {e}. Menghubungkan ulang dalam 5 detik...")
+                self.public_ws = None
+                await asyncio.sleep(5)
+
+    def handle_ws_kline(self, symbol: str, kline_data: dict):
+        interval = kline_data["i"]
+        open_time = kline_data["t"]
+        candle = {
+            "open_time": open_time,
+            "open": kline_data["o"],
+            "high": kline_data["h"],
+            "low": kline_data["l"],
+            "close": kline_data["c"],
+            "volume": kline_data["v"],
+            "close_time": kline_data["T"]
+        }
+        
+        key = (symbol, interval)
+        with self.lock:
+            if key not in self.klines:
+                self.klines[key] = []
+                threading.Thread(target=self.load_kline_history_sync, args=(symbol, interval), daemon=True).start()
+                return
+                
+            history = self.klines[key]
+            if not history:
+                history.append(candle)
+            elif history[-1]["open_time"] == open_time:
+                history[-1] = candle
+            elif open_time > history[-1]["open_time"]:
+                history.append(candle)
+                if len(history) > 500:
+                    history.pop(0)
+
+    def load_kline_history_sync(self, symbol: str, interval: str):
+        key = (symbol, interval)
+        try:
+            client = BinanceClient(symbol=symbol)
+            market = client.klines_rest(interval=interval, limit=200)
+            candles = market["candles"]
+            with self.lock:
+                self.klines[key] = candles
+            print(f"[WS KLINES] Sukses pre-populate history {symbol} {interval} ({len(candles)} candles).")
+        except Exception as e:
+            print(f"[WS KLINES ERROR] Gagal pre-populate history {symbol} {interval}: {e}")
+
+    def process_ws_depth(self, symbol: str, data: dict):
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+        if not bids or not asks:
+            return
+            
+        try:
+            bid_notional = sum(Decimal(str(price)) * Decimal(str(qty)) for price, qty in bids)
+            ask_notional = sum(Decimal(str(price)) * Decimal(str(qty)) for price, qty in asks)
+            total = bid_notional + ask_notional
+            bid_ratio = (bid_notional / total) if total > 0 else Decimal("0.5")
+            ask_ratio = (ask_notional / total) if total > 0 else Decimal("0.5")
+            best_bid = Decimal(str(bids[0][0])) if bids else Decimal("0")
+            best_ask = Decimal(str(asks[0][0])) if asks else Decimal("0")
+            spread_percent = Decimal("0")
+            if best_bid > 0 and best_ask > 0:
+                spread_percent = ((best_ask - best_bid) / best_bid) * Decimal("100")
+                
+            book = {
+                "symbol": symbol,
+                "limit": len(bids),
+                "best_bid": str(best_bid),
+                "best_ask": str(best_ask),
+                "bid_notional": str(bid_notional),
+                "ask_notional": str(ask_notional),
+                "bid_ratio": str(bid_ratio),
+                "ask_ratio": str(ask_ratio),
+                "spread_percent": str(spread_percent),
+            }
+            with self.lock:
+                self.order_books[symbol] = book
+        except Exception as e:
+            print(f"[WS DEPTH ERROR] {symbol}: {e}")
+
+    async def private_ws_loop(self):
+        while self.running:
+            client = BinanceClient()
+            if not client.has_signed_credentials():
+                await asyncio.sleep(5)
+                continue
+                
+            try:
+                listen_key = await asyncio.to_thread(self.fetch_listen_key)
+                self.listen_key = listen_key
+                
+                base = self.get_ws_base_url()
+                url = f"{base}/ws/{listen_key}"
+                print(f"[WS PRIVATE] Koneksi ke User Data Stream: {url}")
+                
+                await asyncio.to_thread(self.init_snapshots)
+                
+                async with websockets.connect(url) as ws:
+                    self.private_ws = ws
+                    print("[WS PRIVATE] User Data Stream WebSocket Terkoneksi!")
+                    async for raw_msg in ws:
+                        msg = json.loads(raw_msg)
+                        event_type = msg.get("e", "")
+                        print(f"[WS PRIVATE EVENT] Event {event_type} masuk.")
+                        if event_type in {"ACCOUNT_UPDATE", "ORDER_TRADE_UPDATE", "MARGIN_CALL"}:
+                            asyncio.create_task(self.async_refresh_private_data())
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[WS PRIVATE ERROR] Koneksi private terputus: {e}. Hubungkan ulang dalam 5 detik...")
+                self.private_ws = None
+                self.listen_key = None
+                await asyncio.sleep(5)
+
+    def init_snapshots(self):
+        try:
+            client = BinanceClient()
+            if client.has_signed_credentials():
+                # Initial positions
+                positions = client.open_positions_rest()
+                with self.lock:
+                    self.positions = positions
+                
+                # Initial status
+                status = client.status_rest()
+                with self.lock:
+                    self.cached_status = status
+                    
+                # Initial orders
+                with self.lock:
+                    symbols = list(self.symbols)
+                for symbol in symbols:
+                    orders = client.open_orders_rest(symbol)
+                    with self.lock:
+                        self.open_orders[symbol] = orders
+            print("[WS INIT] Sukses mengambil snapshots awal.")
+        except Exception as e:
+            print(f"[WS INIT ERROR] Gagal load initial snapshot: {e}")
+
+    def refresh_private_data(self):
+        try:
+            client = BinanceClient()
+            if client.has_signed_credentials():
+                positions = client.open_positions_rest()
+                with self.lock:
+                    self.positions = positions
+                
+                status = client.status_rest()
+                with self.lock:
+                    self.cached_status = status
+                    
+                with self.lock:
+                    symbols = list(self.symbols)
+                for symbol in symbols:
+                    orders = client.open_orders_rest(symbol)
+                    with self.lock:
+                        self.open_orders[symbol] = orders
+                print("[WS PRIVATE REFRESH] Data internal di-refresh dengan sukses.")
+        except Exception as e:
+            print(f"[WS PRIVATE REFRESH ERROR] Gagal refresh data: {e}")
+
+    async def async_refresh_private_data(self):
+        await asyncio.sleep(0.5)
+        await asyncio.to_thread(self.refresh_private_data)
+
+    def get_cached_price(self, symbol: str) -> Decimal | None:
+        with self.lock:
+            val = self.prices.get(symbol.upper())
+            return Decimal(str(val)) if val is not None else None
+
+    def get_cached_klines(self, symbol: str, interval: str, limit: int) -> dict | None:
+        key = (symbol.upper(), interval)
+        with self.lock:
+            if key not in self.klines or not self.klines[key]:
+                return None
+            candles = list(self.klines[key])
+        return {"symbol": symbol, "interval": interval, "candles": candles[-limit:]}
+
+    def get_cached_order_book(self, symbol: str) -> dict | None:
+        with self.lock:
+            return self.order_books.get(symbol.upper())
+
+    def get_cached_open_positions(self) -> list[dict] | None:
+        with self.lock:
+            return list(self.positions) if self.positions is not None else None
+
+    def get_cached_open_orders(self, symbol: str) -> list[dict] | None:
+        with self.lock:
+            orders = self.open_orders.get(symbol.upper())
+            return list(orders) if orders is not None else []
+
+    def get_cached_status(self) -> dict | None:
+        with self.lock:
+            return dict(self.cached_status) if self.cached_status is not None else None
+
+
+def run_ws_manager():
+    global BINANCE_WS_MANAGER
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(BINANCE_WS_MANAGER.start())
+
+
+def start_ws_manager() -> None:
+    global BINANCE_WS_MANAGER
+    if BINANCE_WS_MANAGER is None:
+        BINANCE_WS_MANAGER = BinanceWebSocketManager()
+    if not BINANCE_WS_MANAGER.running:
+        print("[WS MANAGER] Memulai WebSocket manager di background thread...")
+        thread = threading.Thread(target=run_ws_manager, daemon=True)
+        thread.start()
+        time.sleep(1.5)  # Beri jeda agar WebSocket siap dan snapshot awal ter-load
+
+
 def main() -> None:
     load_dotenv()
+    start_ws_manager()
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8765"))
     if auto_scalping_enabled():
