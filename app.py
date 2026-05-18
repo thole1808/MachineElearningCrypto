@@ -2550,10 +2550,19 @@ class BinanceWebSocketManager:
             asyncio.create_task(self.public_ws_loop()),
             asyncio.create_task(self.private_ws_loop()),
             asyncio.create_task(self.keep_alive_loop()),
-            asyncio.create_task(self.symbol_monitor_loop())
+            asyncio.create_task(self.symbol_monitor_loop()),
+            asyncio.create_task(self.private_polling_loop())
         ]
         
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def private_polling_loop(self):
+        while self.running:
+            try:
+                await asyncio.to_thread(self.refresh_private_data)
+            except Exception as e:
+                print(f"[WS PRIVATE POLLING ERROR] Gagal refresh: {e}")
+            await asyncio.sleep(10)
 
     async def keep_alive_loop(self):
         while self.running:
