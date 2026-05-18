@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, useRef } from "react";
 
 type Balance = {
   asset: string;
@@ -234,6 +234,78 @@ function toneClass(value?: string) {
   return "";
 }
 
+function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timeframe?: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const containerId = `tradingview_${Math.random().toString(36).substring(7)}`;
+    if (containerRef.current) {
+      containerRef.current.id = containerId;
+    }
+
+    const scriptId = "tradingview-widget-script";
+    let script = document.getElementById(scriptId) as HTMLScriptElement;
+
+    const initWidget = () => {
+      if (typeof window !== "undefined" && (window as any).TradingView) {
+        let formattedSymbol = symbol;
+        if (!symbol.includes(":")) {
+          formattedSymbol = `BINANCE:${symbol.toUpperCase()}`;
+        }
+
+        new (window as any).TradingView.widget({
+          autosize: true,
+          symbol: formattedSymbol,
+          interval: timeframe,
+          timezone: "Asia/Jakarta",
+          theme: "dark",
+          style: "1",
+          locale: "en",
+          enable_publishing: false,
+          hide_side_toolbar: false,
+          allow_symbol_change: true,
+          container_id: containerId,
+          studies: [
+            "RSI@tv-basicstudies",
+            "MASimple@tv-basicstudies"
+          ],
+          show_popup_button: true,
+          popup_width: "1000",
+          popup_height: "650",
+        });
+      }
+    };
+
+    if (!script) {
+      script = document.createElement("script");
+      script.id = scriptId;
+      script.src = "https://s3.tradingview.com/tv.js";
+      script.type = "text/javascript";
+      script.async = true;
+      script.onload = initWidget;
+      document.head.appendChild(script);
+    } else {
+      if ((window as any).TradingView) {
+        initWidget();
+      } else {
+        script.addEventListener("load", initWidget);
+      }
+    }
+
+    return () => {
+      if (script) {
+        script.removeEventListener("load", initWidget);
+      }
+    };
+  }, [symbol, timeframe]);
+
+  return (
+    <div style={{ height: "100%", width: "100%", minHeight: "450px" }} className="tradingview-chart-container">
+      <div ref={containerRef} style={{ height: "100%", width: "100%", minHeight: "450px" }} />
+    </div>
+  );
+}
+
 export default function Home() {
   const mounted = useSyncExternalStore(subscribeHydration, clientSnapshot, serverSnapshot);
   const [status, setStatus] = useState<BinanceStatus | null>(null);
@@ -255,6 +327,7 @@ export default function Home() {
   const [controlError, setControlError] = useState("");
   const [tpLoadingSymbol, setTpLoadingSymbol] = useState("");
   const [positionMessage, setPositionMessage] = useState("");
+  const [chartTimeframe, setChartTimeframe] = useState("5");
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -476,6 +549,12 @@ export default function Home() {
   }, [status]);
 
   const openPositions = status?.open_positions || [];
+  const chartSymbol = useMemo(() => {
+    if (openPositions.length > 0) {
+      return openPositions[0].symbol;
+    }
+    return selectedSymbol;
+  }, [openPositions, selectedSymbol]);
   const futuresBalances = status?.balances || [];
   const visibleFuturesBalances = futuresBalances.filter((balance) => {
     const wallet = Number(balance.walletUsdt ?? balance.walletBalance ?? 0);
@@ -589,6 +668,53 @@ export default function Home() {
           <span>{status?.symbol || selectedSymbol}</span>
           <strong className="price-value">{formatPrice(status?.price?.price)}</strong>
         </article>
+      </section>
+
+      {/* Live Chart & Candlesticks Panel */}
+      <section className="panel glass chart-panel">
+        <header className="panel-head chart-header">
+          <div>
+            <h2 style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              Live Chart & Candlesticks
+              <div className="chart-symbol-badge">
+                <span className="chart-symbol-pulse"></span>
+                {chartSymbol}
+              </div>
+            </h2>
+            <p>
+              {openPositions.length > 0
+                ? "Menampilkan grafik entry yang sedang berjalan secara live."
+                : "Pilih koin di panel scan untuk menampilkan grafiknya."}
+            </p>
+          </div>
+          <div className="chart-controls">
+            <span style={{ fontSize: "12px", color: "var(--muted)", fontWeight: "600" }}>TIMEFRAME:</span>
+            <div className="timeframe-selector" aria-label="Pilih timeframe chart">
+              {[
+                { label: "1m", value: "1" },
+                { label: "3m", value: "3" },
+                { label: "5m", value: "5" },
+                { label: "15m", value: "15" },
+                { label: "30m", value: "30" },
+                { label: "1H", value: "60" },
+                { label: "4H", value: "240" },
+                { label: "1D", value: "D" },
+              ].map((tf) => (
+                <button
+                  className={chartTimeframe === tf.value ? "active" : ""}
+                  key={tf.value}
+                  type="button"
+                  onClick={() => setChartTimeframe(tf.value)}
+                >
+                  {tf.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </header>
+        <div className="chart-wrapper">
+          <TradingViewChart symbol={chartSymbol} timeframe={chartTimeframe} />
+        </div>
       </section>
 
       <section className="workspace">
