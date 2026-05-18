@@ -13,19 +13,19 @@ export async function GET(request: NextRequest) {
       .filter(Boolean);
 
     try {
-      const signals = await Promise.all(
-        symbolList.map(async (item) => {
-          const query = new URLSearchParams({ symbol: item });
-          const response = await fetch(`${botApiUrl}/api/auto-signal?${query.toString()}`, {
-            cache: "no-store",
-          });
-          const body = await response.json();
-          if (!response.ok || !body.ok) {
-            return { symbol: item, ok: false, error: body.error || "Gagal membaca signal." };
-          }
-          return { ok: true, signal: body.signal };
-        }),
-      );
+      const signals = [];
+      for (const item of symbolList) {
+        const query = new URLSearchParams({ symbol: item });
+        const response = await fetch(`${botApiUrl}/api/auto-signal?${query.toString()}`, {
+          cache: "no-store",
+        });
+        const body = await response.json();
+        if (!response.ok || !body.ok) {
+          signals.push({ symbol: item, ok: false, error: body.error || "Gagal membaca signal." });
+        } else {
+          signals.push({ ok: true, signal: body.signal });
+        }
+      }
 
       return NextResponse.json({ ok: true, signals });
     } catch (error) {

@@ -111,15 +111,22 @@ type TradingControlResponse = {
   error?: string;
 };
 
-const signalSymbols = (
+type ScalpingSymbolsResponse = {
+  ok: boolean;
+  symbols?: string[];
+  error?: string;
+};
+
+const fallbackSignalSymbols = (
   process.env.NEXT_PUBLIC_SIGNAL_SYMBOLS ||
-  "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,INJUSDT,NEARUSDT,ONDOUSDT,ENAUSDT,HYPEUSDT,1000PEPEUSDT,XAUUSDT"
+  "BTCUSDT"
 )
   .split(",")
   .map((symbol) => symbol.trim().toUpperCase())
   .filter(Boolean);
-const defaultSymbol = signalSymbols[0] || "BTCUSDT";
-const realtimeRefreshMs = 10000;
+const defaultSymbol = fallbackSignalSymbols[0] || "BTCUSDT";
+const positionRefreshMs = 10000;
+const signalRefreshMs = 60000;
 type BalanceCurrency = "USDT" | "IDR";
 
 const subscribeHydration = () => () => undefined;
@@ -203,6 +210,7 @@ export default function Home() {
   const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
   const [autoSignals, setAutoSignals] = useState<AutoSignal[]>([]);
+  const [signalSymbols, setSignalSymbols] = useState<string[]>(fallbackSignalSymbols);
   const [hideBalance, setHideBalance] = useState(false);
   const [tradeLoadingSymbol, setTradeLoadingSymbol] = useState("");
   const [tradeMessage, setTradeMessage] = useState("");
@@ -267,7 +275,20 @@ export default function Home() {
     } catch (caught) {
       setSignalError(caught instanceof Error ? caught.message : "Terjadi error saat membaca signal.");
     }
-  }, [selectedSymbol]);
+  }, [selectedSymbol, signalSymbols]);
+
+  const loadScalpingSymbols = useCallback(async () => {
+    try {
+      const response = await fetch("/api/scalping/symbols");
+      const body = (await response.json()) as ScalpingSymbolsResponse;
+      if (!response.ok || !body.ok || !body.symbols?.length) {
+        throw new Error(body.error || "Backend belum bisa membaca daftar scalping.");
+      }
+      setSignalSymbols(body.symbols);
+    } catch {
+      setSignalSymbols(fallbackSignalSymbols);
+    }
+  }, []);
 
   const loadTradingControl = useCallback(async () => {
     try {
@@ -365,22 +386,31 @@ export default function Home() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
-      loadAutoSignal();
       loadTradingControl();
-    }, realtimeRefreshMs);
+    }, positionRefreshMs);
 
     return () => window.clearInterval(timer);
-  }, [checkBinance, loadAutoSignal, loadTradingControl]);
+  }, [checkBinance, loadTradingControl]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      loadScalpingSymbols();
+      loadAutoSignal();
+    }, signalRefreshMs);
+
+    return () => window.clearInterval(timer);
+  }, [loadAutoSignal, loadScalpingSymbols]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       checkBinance();
+      loadScalpingSymbols();
       loadAutoSignal();
       loadTradingControl();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [checkBinance, loadAutoSignal, loadTradingControl]);
+  }, [checkBinance, loadAutoSignal, loadScalpingSymbols, loadTradingControl]);
 
   const setupMessages = useMemo(() => {
     const messages: string[] = [];
@@ -513,7 +543,7 @@ export default function Home() {
           <header className="panel-head">
             <div>
               <h2>Open Positions</h2>
-              <p>Entry, mark, target TP/SL, ROE, dan liquidation realtime.</p>
+              <p>Entry, mark, target TP/SL, ROE, dan liquidation refresh tiap {positionRefreshMs / 1000} detik.</p>
             </div>
           </header>
           {positionMessage ? <div className="alert compact">{positionMessage}</div> : null}
@@ -628,7 +658,7 @@ export default function Home() {
           <header className="panel-head">
             <div>
               <h2>Signal</h2>
-              <p>Scan {signalSymbols.length} pair, refresh tiap {realtimeRefreshMs / 1000} detik.</p>
+              <p>Scan {signalSymbols.length} pair, refresh tiap {signalRefreshMs / 1000} detik.</p>
             </div>
             <div className="signal-actions">
               <strong className={activeSignalCards.length ? "signal-badge buy" : "signal-badge"}>

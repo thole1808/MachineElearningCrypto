@@ -22,6 +22,8 @@ MEMORY_FILE = DATA_DIR / "conversations.jsonl"
 TRADE_STATE_FILE = DATA_DIR / "trade_state.json"
 TRADE_MEMORY: dict[str, dict[str, int]] = {}
 SIGNAL_NOTIFY_MEMORY: dict[str, int] = {}
+AUTO_SYMBOL_MEMORY: dict[str, object] = {"ts": 0, "symbols": []}
+SIGNAL_CACHE: dict[str, dict[str, object]] = {}
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -30,6 +32,77 @@ def env_bool(name: str, default: str = "false") -> bool:
 
 def auto_scalping_enabled() -> bool:
     return env_bool("AUTO_SCALPING", "false")
+
+
+def cached_auto_signal(symbol: str, force_refresh: bool = False) -> dict:
+    clean_symbol = normalize_symbol(symbol)
+    ttl_seconds = int(os.getenv("SIGNAL_CACHE_TTL_SECONDS", "60"))
+    now = int(time.time())
+    cached = SIGNAL_CACHE.get(clean_symbol)
+    if (
+        not force_refresh
+        and cached
+        and now - int(cached.get("ts", 0)) < ttl_seconds
+        and isinstance(cached.get("signal"), dict)
+    ):
+        return dict(cached["signal"])
+    signal = generate_auto_signal(clean_symbol)
+    SIGNAL_CACHE[clean_symbol] = {"ts": now, "signal": signal}
+    return signal
+
+
+def configured_scalping_symbols() -> list[str]:
+    raw_symbols = os.getenv("SCALPING_SYMBOLS", "XAUUSDT").strip()
+    if raw_symbols.upper() == "AUTO":
+        return auto_scalping_symbols()
+    return [normalize_symbol(s) for s in raw_symbols.split(",") if s.strip()]
+
+
+def auto_scalping_symbols() -> list[str]:
+    now = int(time.time())
+    ttl_seconds = int(os.getenv("AUTO_SYMBOL_REFRESH_SECONDS", "300"))
+    cached_symbols = AUTO_SYMBOL_MEMORY.get("symbols")
+    cached_ts = int(AUTO_SYMBOL_MEMORY.get("ts", 0))
+    if isinstance(cached_symbols, list) and cached_symbols and now - cached_ts < ttl_seconds:
+        return [str(symbol) for symbol in cached_symbols]
+
+    client = BinanceClient(symbol=os.getenv("TRADE_SYMBOL", "BTCUSDT"))
+    rows = client.public_get("/fapi/v1/ticker/24hr")
+    if not isinstance(rows, list):
+        return [normalize_symbol(os.getenv("TRADE_SYMBOL", "BTCUSDT"))]
+
+    min_volume = Decimal(os.getenv("AUTO_SYMBOL_MIN_QUOTE_VOLUME", "20000000"))
+    limit = int(os.getenv("AUTO_SYMBOL_LIMIT", "8"))
+    mode = os.getenv("AUTO_SYMBOL_MODE", "gainers").strip().lower()
+    blacklist = {
+        item.strip().upper()
+        for item in os.getenv("AUTO_SYMBOL_BLACKLIST", "USDCUSDT,FDUSDUSDT").split(",")
+        if item.strip()
+    }
+    candidates: list[dict] = []
+    for row in rows:
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol.endswith("USDT") or symbol in blacklist:
+            continue
+        try:
+            quote_volume = Decimal(str(row.get("quoteVolume", "0")))
+            change = Decimal(str(row.get("priceChangePercent", "0")))
+        except Exception:
+            continue
+        if quote_volume < min_volume:
+            continue
+        candidates.append({"symbol": symbol, "change": change, "abs_change": abs(change), "volume": quote_volume})
+
+    if mode == "movers":
+        candidates.sort(key=lambda item: (item["abs_change"], item["volume"]), reverse=True)
+    else:
+        candidates.sort(key=lambda item: (item["change"], item["volume"]), reverse=True)
+    symbols = [str(item["symbol"]) for item in candidates[:limit]]
+    if not symbols:
+        symbols = [normalize_symbol(os.getenv("TRADE_SYMBOL", "BTCUSDT"))]
+    AUTO_SYMBOL_MEMORY["ts"] = now
+    AUTO_SYMBOL_MEMORY["symbols"] = symbols
+    return symbols
 
 
 def write_env_value(key: str, value: str) -> None:
@@ -456,6 +529,36 @@ class BinanceClient:
         ]
         return {"symbol": self.symbol, "interval": interval, "candles": candles}
 
+    def order_book(self, limit: int = 20) -> dict:
+        safe_limit = max(5, min(limit, 100))
+        rows = self.public_get(
+            "/fapi/v1/depth" if self.is_futures() else "/api/v3/depth",
+            {"symbol": self.symbol, "limit": str(safe_limit)},
+        )
+        bids = rows.get("bids", []) if isinstance(rows, dict) else []
+        asks = rows.get("asks", []) if isinstance(rows, dict) else []
+        bid_notional = sum(Decimal(str(price)) * Decimal(str(qty)) for price, qty in bids)
+        ask_notional = sum(Decimal(str(price)) * Decimal(str(qty)) for price, qty in asks)
+        total = bid_notional + ask_notional
+        bid_ratio = (bid_notional / total) if total > 0 else Decimal("0.5")
+        ask_ratio = (ask_notional / total) if total > 0 else Decimal("0.5")
+        best_bid = Decimal(str(bids[0][0])) if bids else Decimal("0")
+        best_ask = Decimal(str(asks[0][0])) if asks else Decimal("0")
+        spread_percent = Decimal("0")
+        if best_bid > 0 and best_ask > 0:
+            spread_percent = ((best_ask - best_bid) / best_bid) * Decimal("100")
+        return {
+            "symbol": self.symbol,
+            "limit": safe_limit,
+            "best_bid": str(best_bid),
+            "best_ask": str(best_ask),
+            "bid_notional": str(bid_notional),
+            "ask_notional": str(ask_notional),
+            "bid_ratio": str(bid_ratio),
+            "ask_ratio": str(ask_ratio),
+            "spread_percent": str(spread_percent),
+        }
+
     def get_price(self) -> Decimal:
         path = "/fapi/v1/ticker/price" if self.is_futures() else "/api/v3/ticker/price"
         payload = self.public_get(path, {"symbol": self.symbol})
@@ -697,6 +800,23 @@ class BinanceClient:
             return False
         return len(self.open_positions()) >= max_positions
 
+    def open_orders(self, symbol: str | None = None) -> list[dict]:
+        if self.dry_run():
+            return []
+        target_symbol = normalize_symbol(symbol or self.symbol)
+        rows = self.signed_get("/fapi/v1/openOrders", {"symbol": target_symbol})
+        if isinstance(rows, list):
+            return rows
+        return []
+
+    def cancel_order(self, symbol: str, order_id: str | int) -> dict:
+        if self.dry_run():
+            return {"dry_run": True, "symbol": normalize_symbol(symbol), "orderId": str(order_id)}
+        return self.signed_delete(
+            "/fapi/v1/order",
+            {"symbol": normalize_symbol(symbol), "orderId": str(order_id)},
+        )
+
     def set_leverage(self, leverage: int | None = None) -> dict:
         if not self.is_futures():
             return {"skipped": True, "reason": "Leverage hanya untuk futures."}
@@ -743,6 +863,45 @@ class BinanceClient:
         if self.dry_run():
             return {"dry_run": True, "endpoint": "/fapi/v1/order", "params": params}
         return self.signed_post("/fapi/v1/order", params)
+
+    def place_futures_limit_order(
+        self,
+        side: str,
+        price: Decimal,
+        quantity: str | None = None,
+        reduce_only: bool = False,
+        position_side: str | None = None,
+    ) -> dict:
+        if not self.is_futures():
+            raise ValueError("Auto order saat ini hanya dibuat untuk Binance Futures USDT-M.")
+        clean_side = side.strip().upper()
+        if clean_side not in {"BUY", "SELL"}:
+            raise ValueError("side harus BUY atau SELL.")
+        qty = quantity or self.calculate_quantity()
+        params = {
+            "symbol": self.symbol,
+            "side": clean_side,
+            "type": "LIMIT",
+            "timeInForce": os.getenv("ENTRY_LIMIT_TIME_IN_FORCE", "GTC").strip().upper(),
+            "quantity": qty,
+            "price": self.round_price(price),
+        }
+        resolved_position_side = self.order_position_side(clean_side, position_side)
+        if resolved_position_side:
+            params["positionSide"] = resolved_position_side
+        if reduce_only and not resolved_position_side:
+            params["reduceOnly"] = "true"
+        if self.dry_run():
+            return {"dry_run": True, "endpoint": "/fapi/v1/order", "params": params}
+        return self.signed_post("/fapi/v1/order", params)
+
+    def entry_limit_price(self, side: str, reference_price: Decimal) -> Decimal:
+        offset_percent = Decimal(os.getenv("ENTRY_LIMIT_OFFSET_PERCENT", "0.03"))
+        if offset_percent < 0:
+            offset_percent = Decimal("0")
+        if side.upper() == "BUY":
+            return reference_price * (Decimal("1") - offset_percent / Decimal("100"))
+        return reference_price * (Decimal("1") + offset_percent / Decimal("100"))
 
     def place_tp_sl_orders(self, entry_side: str, entry_price: Decimal) -> dict:
         if not env_bool("USE_TP_SL_ORDERS", "true"):
@@ -858,13 +1017,18 @@ class BinanceClient:
         quantity = self.calculate_quantity(usdt_amount)
         leverage_result = self.set_leverage(leverage)
         entry_price = self.get_price()
-        order_result = self.place_futures_market_order(side, quantity=quantity)
+        entry_order_type = os.getenv("ENTRY_ORDER_TYPE", "MARKET").strip().upper()
+        if entry_order_type == "LIMIT":
+            limit_price = self.entry_limit_price(side, entry_price)
+            order_result = self.place_futures_limit_order(side, price=limit_price, quantity=quantity)
+        else:
+            order_result = self.place_futures_market_order(side, quantity=quantity)
         try:
             tp_sl_result = self.place_tp_sl_orders(side, entry_price)
         except RuntimeError as error:
             tp_sl_result = {
                 "skipped": True,
-                "reason": "TP/SL order gagal dibuat, tapi entry market sudah terkirim.",
+                "reason": "TP/SL order gagal dibuat, tapi entry order sudah terkirim.",
                 "error": str(error),
             }
         return {
@@ -876,6 +1040,7 @@ class BinanceClient:
             "leverage": leverage,
             "quantity": quantity,
             "entry_price_reference": str(entry_price),
+            "entry_order_type": entry_order_type,
             "leverage_result": leverage_result,
             "order_result": order_result,
             "tp_sl_result": tp_sl_result,
@@ -954,6 +1119,27 @@ def volume_ok(volumes: list[Decimal]) -> bool:
     avg_volume = sum(volumes[-21:-1]) / Decimal("20")
     multiplier = Decimal(os.getenv("VOLUME_MULTIPLIER", "1.2"))
     return last_volume >= avg_volume * multiplier
+
+
+def order_book_confirmation(client: BinanceClient, side: str) -> tuple[bool, dict, str]:
+    if not env_bool("USE_ORDER_BOOK_CONFIRMATION", "true"):
+        return True, {}, "order book filter off"
+    depth_limit = int(os.getenv("ORDER_BOOK_DEPTH_LIMIT", "20"))
+    max_spread_percent = Decimal(os.getenv("ORDER_BOOK_MAX_SPREAD_PERCENT", "0.08"))
+    min_imbalance = Decimal(os.getenv("ORDER_BOOK_MIN_IMBALANCE", "0.55"))
+    book = client.order_book(limit=depth_limit)
+    bid_ratio = Decimal(str(book.get("bid_ratio", "0.5")))
+    ask_ratio = Decimal(str(book.get("ask_ratio", "0.5")))
+    spread_percent = Decimal(str(book.get("spread_percent", "0")))
+    if spread_percent > max_spread_percent:
+        return False, book, f"spread lebar {spread_percent.quantize(Decimal('0.0001'))}%"
+    if side == "BUY" and bid_ratio < min_imbalance:
+        return False, book, f"bid support kurang {bid_ratio.quantize(Decimal('0.01'))}"
+    if side == "SELL" and ask_ratio < min_imbalance:
+        return False, book, f"ask pressure kurang {ask_ratio.quantize(Decimal('0.01'))}"
+    label = "bid support" if side == "BUY" else "ask pressure"
+    ratio = bid_ratio if side == "BUY" else ask_ratio
+    return True, book, f"{label} valid {ratio.quantize(Decimal('0.01'))}"
 
 
 def generate_auto_signal(symbol: str) -> dict:
@@ -1070,12 +1256,22 @@ def generate_auto_signal(symbol: str) -> dict:
             if trend_up:
                 sell_score -= 3
 
+        book: dict = {}
+        book_reason = "-"
         if buy_score >= signal_score_threshold and buy_score > sell_score:
-            signal = "BUY"
-            reason = f"SCORE BUY {buy_score}/{signal_score_threshold}: " + ", ".join(buy_reasons)
+            book_ok, book, book_reason = order_book_confirmation(client, "BUY")
+            if book_ok:
+                signal = "BUY"
+                reason = f"SCORE BUY {buy_score}/{signal_score_threshold}: " + ", ".join(buy_reasons + [book_reason])
+            else:
+                reason = f"NO SIGNAL: BUY score valid tapi order book belum confirm ({book_reason})"
         elif sell_score >= signal_score_threshold and sell_score > buy_score:
-            signal = "SELL"
-            reason = f"SCORE SELL {sell_score}/{signal_score_threshold}: " + ", ".join(sell_reasons)
+            book_ok, book, book_reason = order_book_confirmation(client, "SELL")
+            if book_ok:
+                signal = "SELL"
+                reason = f"SCORE SELL {sell_score}/{signal_score_threshold}: " + ", ".join(sell_reasons + [book_reason])
+            else:
+                reason = f"NO SIGNAL: SELL score valid tapi order book belum confirm ({book_reason})"
         else:
             reason = (
                 f"NO SIGNAL: buy_score={buy_score}, sell_score={sell_score}, need={signal_score_threshold}, "
@@ -1095,6 +1291,8 @@ def generate_auto_signal(symbol: str) -> dict:
             "trend_interval": trend_interval,
             "trend_rsi": str(trend_rsi.quantize(Decimal("0.01"))),
             "atr": str(atr_now),
+            "order_book": book,
+            "order_book_reason": book_reason,
         }
 
     if fast_prev <= slow_prev and ema_trend_up and rsi_now >= buy_rsi and has_volume:
@@ -1135,17 +1333,51 @@ def generate_auto_signal(symbol: str) -> dict:
     }
 
 
+def cancel_stale_limit_orders(symbols: list[str]) -> None:
+    if not env_bool("CANCEL_STALE_LIMIT_ORDERS", "true"):
+        return
+    max_age_seconds = int(os.getenv("LIMIT_ORDER_MAX_AGE_SECONDS", "180"))
+    if max_age_seconds <= 0:
+        return
+    now_ms = int(time.time() * 1000)
+    for symbol in symbols:
+        try:
+            client = BinanceClient(symbol=symbol)
+            for order in client.open_orders(symbol):
+                order_type = str(order.get("type", "")).upper()
+                reduce_only = str(order.get("reduceOnly", "false")).lower() == "true"
+                close_position = str(order.get("closePosition", "false")).lower() == "true"
+                if order_type != "LIMIT" or reduce_only or close_position:
+                    continue
+                order_time = int(order.get("time", order.get("updateTime", "0")) or "0")
+                age_seconds = int((now_ms - order_time) / 1000) if order_time > 0 else max_age_seconds + 1
+                if age_seconds < max_age_seconds:
+                    continue
+                order_id = order.get("orderId")
+                result = client.cancel_order(symbol, order_id)
+                print(f"[CANCEL STALE LIMIT] {symbol} order={order_id} age={age_seconds}s result={json.dumps(result, ensure_ascii=False)}")
+                send_telegram(
+                    f"<b>CANCEL LIMIT ORDER</b>\n"
+                    f"{symbol}\n"
+                    f"Order: {order_id}\n"
+                    f"Age: {age_seconds}s"
+                )
+        except Exception as error:
+            print(f"[CANCEL STALE LIMIT ERROR] {symbol}: {error}")
+
+
 def auto_scalping_loop() -> None:
-    symbols = [normalize_symbol(s) for s in os.getenv("SCALPING_SYMBOLS", "XAUUSDT").split(",") if s.strip()]
     interval_seconds = int(os.getenv("SCALPING_INTERVAL", "60"))
     print("=" * 70)
     print("AUTO SCALPING LOOP START")
-    print("Symbols:", ", ".join(symbols))
+    print("Symbols:", os.getenv("SCALPING_SYMBOLS", "XAUUSDT"))
     print("Interval:", interval_seconds, "seconds")
     print("=" * 70)
     while True:
         try:
+            symbols = configured_scalping_symbols()
             position_client = BinanceClient(symbol=symbols[0] if symbols else None)
+            cancel_stale_limit_orders(symbols)
             positions = position_client.open_positions()
             open_count = len(positions)
             max_positions = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
@@ -1229,7 +1461,7 @@ def auto_scalping_loop() -> None:
 
             for symbol in symbols:
                 try:
-                    signal_info = generate_auto_signal(symbol)
+                    signal_info = cached_auto_signal(symbol)
                     print(
                         f"[SCAN] {symbol} | signal={signal_info['signal']} | "
                         f"rsi={signal_info['rsi']} | open={open_count}/{max_positions} | "
@@ -1430,11 +1662,17 @@ class BotHandler(SimpleHTTPRequestHandler):
             except Exception as error:
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return
+        if parsed.path == "/api/scalping/symbols":
+            try:
+                self.send_json({"ok": True, "symbols": configured_scalping_symbols()})
+            except Exception as error:
+                self.send_json({"ok": False, "error": str(error)}, status=502)
+            return
         if parsed.path == "/api/auto-signal":
             query = urllib.parse.parse_qs(parsed.query)
             symbol = query.get("symbol", [os.getenv("TRADE_SYMBOL", "XAUUSDT")])[0]
             try:
-                self.send_json({"ok": True, "signal": generate_auto_signal(normalize_symbol(symbol))})
+                self.send_json({"ok": True, "signal": cached_auto_signal(normalize_symbol(symbol))})
             except Exception as error:
                 self.send_json({"ok": False, "error": str(error)}, status=502)
             return
@@ -1544,7 +1782,7 @@ class BotHandler(SimpleHTTPRequestHandler):
                 )
                 return
             symbol = normalize_symbol(str(body.get("symbol", os.getenv("TRADE_SYMBOL", "XAUUSDT"))))
-            signal_info = generate_auto_signal(symbol)
+            signal_info = cached_auto_signal(symbol, force_refresh=True)
             side = signal_info.get("signal")
             if not side:
                 self.send_json({"ok": False, "error": signal_info.get("reason", "NO SIGNAL"), "signal": signal_info}, status=400)
