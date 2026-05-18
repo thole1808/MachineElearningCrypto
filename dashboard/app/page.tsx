@@ -564,11 +564,14 @@ export default function Home() {
 
   const openPositions = status?.open_positions || [];
   const chartSymbol = useMemo(() => {
+    if (openPositions.length > 0) {
+      if (activeChartSymbol && openPositions.some(p => p.symbol === activeChartSymbol)) {
+        return activeChartSymbol;
+      }
+      return openPositions[0].symbol;
+    }
     if (activeChartSymbol) {
       return activeChartSymbol;
-    }
-    if (openPositions.length > 0) {
-      return openPositions[0].symbol;
     }
     return selectedSymbol;
   }, [activeChartSymbol, openPositions, selectedSymbol]);
@@ -730,7 +733,14 @@ export default function Home() {
           </div>
         </header>
         <div className="chart-wrapper">
-          <TradingViewChart symbol={chartSymbol} timeframe={chartTimeframe} />
+          {checked ? (
+            <TradingViewChart symbol={chartSymbol} timeframe={chartTimeframe} />
+          ) : (
+            <div style={{ height: "550px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(15, 23, 42, 0.4)" }}>
+              <div className="chart-symbol-pulse" style={{ width: "32px", height: "32px", marginBottom: "16px" }}></div>
+              <span style={{ color: "var(--muted)", fontWeight: "600", fontSize: "14px", letterSpacing: "0.5px" }}>LOADING MARKET DATA...</span>
+            </div>
+          )}
         </div>
       </section>
 
