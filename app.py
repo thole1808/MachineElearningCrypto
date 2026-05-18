@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import ssl
 import subprocess
 import threading
 import time
@@ -16,6 +17,17 @@ from decimal import Decimal, ROUND_DOWN
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import websockets
+
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+
+def get_websocket_ssl_context():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
@@ -2612,7 +2624,7 @@ class BinanceWebSocketManager:
             url = self.build_public_ws_url(symbols)
             print(f"[WS PUBLIC] Koneksi ke combined streams: {url}")
             try:
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, ssl=get_websocket_ssl_context()) as ws:
                     self.public_ws = ws
                     print("[WS PUBLIC] WebSocket Combined Terkoneksi!")
                     async for raw_msg in ws:
@@ -2731,7 +2743,7 @@ class BinanceWebSocketManager:
                 
                 await asyncio.to_thread(self.init_snapshots)
                 
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, ssl=get_websocket_ssl_context()) as ws:
                     self.private_ws = ws
                     print("[WS PRIVATE] User Data Stream WebSocket Terkoneksi!")
                     async for raw_msg in ws:
