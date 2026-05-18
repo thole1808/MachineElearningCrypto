@@ -955,6 +955,7 @@ class BinanceClient:
         quantity: str | None = None,
         reduce_only: bool = False,
         position_side: str | None = None,
+        client_order_id: str | None = None,
     ) -> dict:
         if not self.is_futures():
             raise ValueError("Auto order saat ini hanya dibuat untuk Binance Futures USDT-M.")
@@ -970,6 +971,8 @@ class BinanceClient:
             "quantity": qty,
             "price": self.round_price(price),
         }
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id[:36]
         resolved_position_side = self.order_position_side(clean_side, position_side)
         if resolved_position_side:
             params["positionSide"] = resolved_position_side
@@ -1104,7 +1107,13 @@ class BinanceClient:
         entry_order_type = os.getenv("ENTRY_ORDER_TYPE", "MARKET").strip().upper()
         if entry_order_type == "LIMIT":
             limit_price = self.entry_limit_price(side, entry_price)
-            order_result = self.place_futures_limit_order(side, price=limit_price, quantity=quantity)
+            client_order_id = f"mecbot_{self.symbol}_{side.lower()}_{int(time.time())}"
+            order_result = self.place_futures_limit_order(
+                side,
+                price=limit_price,
+                quantity=quantity,
+                client_order_id=client_order_id,
+            )
         else:
             order_result = self.place_futures_market_order(side, quantity=quantity)
         try:
@@ -1291,6 +1300,48 @@ def latest_fvg_signal(candles: list[dict]) -> dict:
     return {"side": None, "gap": None}
 
 
+def fvg_zones(candles: list[dict]) -> list[dict]:
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    opens = to_decimal_list([item["open"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    zones: list[dict] = []
+    if len(candles) < 4:
+        return zones
+    max_zones = int(os.getenv("PAC_FVG_MAX_ACTIVE", "8"))
+    max_width = Decimal(os.getenv("PAC_FVG_MAX_WIDTH_PERCENT", "2"))
+    recent_range = max(highs[-100:]) - min(lows[-100:]) if len(highs) >= 100 else max(highs) - min(lows)
+    min_gap = recent_range * max(max_width, Decimal("0.1")) / Decimal("100")
+    for index in range(2, len(candles)):
+        if opens[index] > closes[index] and lows[index - 2] > highs[index]:
+            gap_size = lows[index - 2] - highs[index]
+            if gap_size >= min_gap:
+                zones.append({"side": "SELL", "low": highs[index], "high": lows[index - 2], "index": index})
+        elif lows[index] > highs[index - 2]:
+            gap_size = lows[index] - highs[index - 2]
+            if gap_size >= min_gap:
+                zones.append({"side": "BUY", "low": highs[index - 2], "high": lows[index], "index": index})
+
+    mitigation = os.getenv("PAC_FVG_MITIGATION", "Close").strip().lower()
+    active: list[dict] = []
+    for zone in zones[-max_zones * 3:]:
+        mitigated = False
+        for index in range(int(zone["index"]) + 1, len(candles)):
+            high = highs[index]
+            low = lows[index]
+            close = closes[index]
+            midpoint = (Decimal(str(zone["low"])) + Decimal(str(zone["high"]))) / Decimal("2")
+            if zone["side"] == "BUY":
+                mitigated = close < Decimal(str(zone["low"])) if mitigation == "close" else low <= midpoint
+            else:
+                mitigated = close > Decimal(str(zone["high"])) if mitigation == "close" else high >= midpoint
+            if mitigated:
+                break
+        if not mitigated:
+            active.append(zone)
+    return active[-max_zones:]
+
+
 def reversal_band_signal(candles: list[dict], atr_values: list[Decimal]) -> dict:
     closes = to_decimal_list([item["close"] for item in candles])
     if len(closes) < 31 or not atr_values:
@@ -1308,16 +1359,142 @@ def reversal_band_signal(candles: list[dict], atr_values: list[Decimal]) -> dict
     return {"side": None}
 
 
+def volume_profile_signal(candles: list[dict]) -> dict:
+    lookback = int(os.getenv("PAC_PROFILE_LOOKBACK", "200"))
+    rows = int(os.getenv("PAC_PROFILE_ROWS", "25"))
+    if len(candles) < 10 or rows <= 0:
+        return {"side": None}
+    window = candles[-min(lookback, len(candles)):]
+    highs = to_decimal_list([item["high"] for item in window])
+    lows = to_decimal_list([item["low"] for item in window])
+    closes = to_decimal_list([item["close"] for item in window])
+    volumes = to_decimal_list([item["volume"] for item in window])
+    low_price = min(lows)
+    high_price = max(highs)
+    step = (high_price - low_price) / Decimal(rows)
+    if step <= 0:
+        return {"side": None}
+    buckets = [Decimal("0")] * rows
+    bullish_buckets = [Decimal("0")] * rows
+    for candle, volume in zip(window, volumes):
+        candle_high = Decimal(str(candle["high"]))
+        candle_low = Decimal(str(candle["low"]))
+        candle_open = Decimal(str(candle["open"]))
+        candle_close = Decimal(str(candle["close"]))
+        span = max(candle_high - candle_low, step)
+        for row in range(rows):
+            row_low = low_price + step * Decimal(row)
+            row_high = row_low + step
+            overlap = max(Decimal("0"), min(candle_high, row_high) - max(candle_low, row_low))
+            if overlap <= 0:
+                continue
+            portion = overlap / span
+            value = volume * portion
+            buckets[row] += value
+            if candle_close > candle_open:
+                bullish_buckets[row] += value
+    poc_index = max(range(rows), key=lambda row: buckets[row])
+    poc = low_price + step * (Decimal(poc_index) + Decimal("0.5"))
+    last_close = closes[-1]
+    total = buckets[poc_index]
+    bullish_ratio = bullish_buckets[poc_index] / total if total > 0 else Decimal("0.5")
+    threshold = Decimal(os.getenv("PAC_PROFILE_POC_DISTANCE_PERCENT", "0.35"))
+    distance_percent = abs(last_close - poc) / last_close * Decimal("100") if last_close > 0 else Decimal("0")
+    side = None
+    if distance_percent <= threshold:
+        side = "BUY" if last_close >= poc and bullish_ratio >= Decimal("0.5") else "SELL" if last_close <= poc and bullish_ratio <= Decimal("0.5") else None
+    return {"side": side, "poc": str(poc), "bullish_ratio": str(bullish_ratio), "distance_percent": str(distance_percent)}
+
+
+def premium_discount_signal(candles: list[dict]) -> dict:
+    lookback = int(os.getenv("PAC_SWING_LOOKBACK", "50"))
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    if len(candles) < lookback:
+        return {"side": None}
+    swing_high = max(highs[-lookback:])
+    swing_low = min(lows[-lookback:])
+    span = swing_high - swing_low
+    if span <= 0:
+        return {"side": None}
+    equilibrium = (swing_high + swing_low) / Decimal("2")
+    position = (closes[-1] - swing_low) / span
+    discount_level = Decimal(os.getenv("PAC_DISCOUNT_LEVEL", "0.35"))
+    premium_level = Decimal(os.getenv("PAC_PREMIUM_LEVEL", "0.65"))
+    side = "BUY" if position <= discount_level else "SELL" if position >= premium_level else None
+    return {"side": side, "position": str(position), "equilibrium": str(equilibrium), "swing_high": str(swing_high), "swing_low": str(swing_low)}
+
+
+def order_block_signal(candles: list[dict], atr_values: list[Decimal]) -> dict:
+    lookback = int(os.getenv("PAC_INTERNAL_LOOKBACK", "5"))
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    opens = to_decimal_list([item["open"] for item in candles])
+    if len(candles) < lookback * 2 + 5:
+        return {"side": None}
+    high_pivots = pivot_highs(highs, lookback, lookback)
+    low_pivots = pivot_lows(lows, lookback, lookback)
+    atr_now = atr_values[-1] if atr_values else Decimal("0")
+    tolerance = atr_now * Decimal(os.getenv("PAC_ORDER_BLOCK_TOUCH_ATR", "0.35"))
+    zones: list[dict] = []
+    if high_pivots and closes[-1] > high_pivots[-1][1]:
+        for index in range(high_pivots[-1][0], max(0, high_pivots[-1][0] - 12), -1):
+            if closes[index] < opens[index]:
+                zones.append({"side": "BUY", "low": lows[index], "high": highs[index], "index": index})
+                break
+    if low_pivots and closes[-1] < low_pivots[-1][1]:
+        for index in range(low_pivots[-1][0], max(0, low_pivots[-1][0] - 12), -1):
+            if closes[index] > opens[index]:
+                zones.append({"side": "SELL", "low": lows[index], "high": highs[index], "index": index})
+                break
+    last_close = closes[-1]
+    for zone in zones:
+        low = Decimal(str(zone["low"]))
+        high = Decimal(str(zone["high"]))
+        touched = low - tolerance <= last_close <= high + tolerance
+        if touched:
+            return {**zone, "low": str(low), "high": str(high)}
+    return zones[-1] if zones else {"side": None}
+
+
+def strong_weak_signal(candles: list[dict]) -> dict:
+    lookback = int(os.getenv("PAC_SWING_LOOKBACK", "50"))
+    highs = to_decimal_list([item["high"] for item in candles])
+    lows = to_decimal_list([item["low"] for item in candles])
+    closes = to_decimal_list([item["close"] for item in candles])
+    if len(candles) < lookback + 2:
+        return {"side": None}
+    swing_high = max(highs[-lookback:-1])
+    swing_low = min(lows[-lookback:-1])
+    if closes[-1] > swing_high:
+        return {"side": "BUY", "tag": "weak high break", "level": str(swing_high)}
+    if closes[-1] < swing_low:
+        return {"side": "SELL", "tag": "weak low break", "level": str(swing_low)}
+    return {"side": None, "level_high": str(swing_high), "level_low": str(swing_low)}
+
+
 def price_action_concepts(candles: list[dict], atr_values: list[Decimal]) -> dict:
     internal = market_structure_signal(candles, int(os.getenv("PAC_INTERNAL_LOOKBACK", "5")))
     swing = market_structure_signal(candles, int(os.getenv("PAC_SWING_LOOKBACK", "50")))
     fvg = latest_fvg_signal(candles)
+    active_fvg = fvg_zones(candles)
     reversal = reversal_band_signal(candles, atr_values)
+    profile = volume_profile_signal(candles)
+    premium_discount = premium_discount_signal(candles)
+    order_block = order_block_signal(candles, atr_values)
+    strong_weak = strong_weak_signal(candles)
     return {
         "internal": internal,
         "swing": swing,
         "fvg": fvg,
+        "active_fvg": active_fvg,
         "reversal": reversal,
+        "profile": profile,
+        "premium_discount": premium_discount,
+        "order_block": order_block,
+        "strong_weak": strong_weak,
     }
 
 
@@ -1452,11 +1629,20 @@ def generate_auto_signal(symbol: str) -> dict:
             internal = pac.get("internal", {})
             swing = pac.get("swing", {})
             fvg = pac.get("fvg", {})
+            active_fvg = pac.get("active_fvg", [])
             reversal = pac.get("reversal", {})
+            profile = pac.get("profile", {})
+            premium_discount = pac.get("premium_discount", {})
+            order_block = pac.get("order_block", {})
+            strong_weak = pac.get("strong_weak", {})
             internal_weight = int(os.getenv("PAC_INTERNAL_STRUCTURE_WEIGHT", "2"))
             swing_weight = int(os.getenv("PAC_SWING_STRUCTURE_WEIGHT", "3"))
             fvg_weight = int(os.getenv("PAC_FVG_WEIGHT", "1"))
             reversal_weight = int(os.getenv("PAC_REVERSAL_BAND_WEIGHT", "1"))
+            profile_weight = int(os.getenv("PAC_PROFILE_WEIGHT", "1"))
+            premium_discount_weight = int(os.getenv("PAC_PREMIUM_DISCOUNT_WEIGHT", "1"))
+            order_block_weight = int(os.getenv("PAC_ORDER_BLOCK_WEIGHT", "2"))
+            strong_weak_weight = int(os.getenv("PAC_STRONG_WEAK_WEIGHT", "1"))
 
             if internal.get("side") == "BUY":
                 buy_score += internal_weight
@@ -1485,6 +1671,45 @@ def generate_auto_signal(symbol: str) -> dict:
             elif reversal.get("side") == "SELL":
                 sell_score += reversal_weight
                 sell_reasons.append("reversal upper band")
+
+            if profile.get("side") == "BUY":
+                buy_score += profile_weight
+                buy_reasons.append("PoC support")
+            elif profile.get("side") == "SELL":
+                sell_score += profile_weight
+                sell_reasons.append("PoC resistance")
+
+            if premium_discount.get("side") == "BUY":
+                buy_score += premium_discount_weight
+                buy_reasons.append("discount zone")
+            elif premium_discount.get("side") == "SELL":
+                sell_score += premium_discount_weight
+                sell_reasons.append("premium zone")
+
+            if order_block.get("side") == "BUY":
+                buy_score += order_block_weight
+                buy_reasons.append("bullish order block")
+            elif order_block.get("side") == "SELL":
+                sell_score += order_block_weight
+                sell_reasons.append("bearish order block")
+
+            if strong_weak.get("side") == "BUY":
+                buy_score += strong_weak_weight
+                buy_reasons.append(str(strong_weak.get("tag", "strong/weak break")))
+            elif strong_weak.get("side") == "SELL":
+                sell_score += strong_weak_weight
+                sell_reasons.append(str(strong_weak.get("tag", "strong/weak break")))
+
+            for zone in active_fvg:
+                if zone.get("side") == "BUY":
+                    buy_score += fvg_weight
+                    buy_reasons.append("active bullish FVG")
+                    break
+            for zone in active_fvg:
+                if zone.get("side") == "SELL":
+                    sell_score += fvg_weight
+                    sell_reasons.append("active bearish FVG")
+                    break
         if not volatility_ok:
             buy_score -= 2
             sell_score -= 2
@@ -1586,7 +1811,10 @@ def cancel_stale_limit_orders(symbols: list[str]) -> None:
                 order_type = str(order.get("type", "")).upper()
                 reduce_only = str(order.get("reduceOnly", "false")).lower() == "true"
                 close_position = str(order.get("closePosition", "false")).lower() == "true"
+                client_order_id = str(order.get("clientOrderId", ""))
                 if order_type != "LIMIT" or reduce_only or close_position:
+                    continue
+                if not client_order_id.startswith("mecbot_"):
                     continue
                 order_time = int(order.get("time", order.get("updateTime", "0")) or "0")
                 age_seconds = int((now_ms - order_time) / 1000) if order_time > 0 else max_age_seconds + 1
