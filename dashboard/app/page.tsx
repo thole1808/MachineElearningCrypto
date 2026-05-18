@@ -238,6 +238,10 @@ function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timefra
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (containerRef.current) {
+      containerRef.current.innerHTML = "";
+    }
+
     const containerId = `tradingview_${Math.random().toString(36).substring(7)}`;
     if (containerRef.current) {
       containerRef.current.id = containerId;
@@ -363,6 +367,10 @@ export default function Home() {
         throw new Error(body.error || "Backend belum bisa membaca status Binance.");
       }
       setStatus(body.binance);
+      const openPos = body.binance.open_positions || [];
+      if (openPos.length > 0) {
+        setActiveChartSymbol((prev) => prev || openPos[0].symbol);
+      }
       setError("");
       setLastUpdatedAt(Date.now());
     } catch (caught) {
