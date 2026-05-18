@@ -1609,6 +1609,34 @@ def generate_auto_signal(symbol: str) -> dict:
         if rsi_now <= sell_rsi and trend_rsi <= Decimal(os.getenv("TREND_SELL_RSI", "48")):
             sell_score += 1
             sell_reasons.append(f"RSI lemah {rsi_now.quantize(Decimal('0.01'))}")
+        rsi_regime = {
+            "enabled": env_bool("USE_RSI_REGIME_FILTER", "false"),
+            "overbought": str(Decimal(os.getenv("RSI_OVERBOUGHT", "70"))),
+            "oversold": str(Decimal(os.getenv("RSI_OVERSOLD", "30"))),
+            "long_block_above": str(Decimal(os.getenv("RSI_LONG_BLOCK_ABOVE", "72"))),
+            "short_block_below": str(Decimal(os.getenv("RSI_SHORT_BLOCK_BELOW", "28"))),
+        }
+        if rsi_regime["enabled"]:
+            rsi_overbought = Decimal(os.getenv("RSI_OVERBOUGHT", "70"))
+            rsi_oversold = Decimal(os.getenv("RSI_OVERSOLD", "30"))
+            rsi_long_block_above = Decimal(os.getenv("RSI_LONG_BLOCK_ABOVE", "72"))
+            rsi_short_block_below = Decimal(os.getenv("RSI_SHORT_BLOCK_BELOW", "28"))
+            rsi_reversal_long_below = Decimal(os.getenv("RSI_REVERSAL_LONG_BELOW", "35"))
+            rsi_reversal_short_above = Decimal(os.getenv("RSI_REVERSAL_SHORT_ABOVE", "65"))
+            rsi_regime_weight = int(os.getenv("RSI_REGIME_WEIGHT", "1"))
+
+            if rsi_now <= rsi_oversold or rsi_now <= rsi_reversal_long_below:
+                buy_score += rsi_regime_weight
+                buy_reasons.append(f"RSI oversold/rebound {rsi_now.quantize(Decimal('0.01'))}")
+            if rsi_now >= rsi_overbought or rsi_now >= rsi_reversal_short_above:
+                sell_score += rsi_regime_weight
+                sell_reasons.append(f"RSI overbought/rejection {rsi_now.quantize(Decimal('0.01'))}")
+            if rsi_now >= rsi_long_block_above or trend_rsi >= rsi_long_block_above:
+                buy_score -= rsi_regime_weight * 2
+                buy_reasons.append("RSI terlalu panas, long dikurangi")
+            if rsi_now <= rsi_short_block_below or trend_rsi <= rsi_short_block_below:
+                sell_score -= rsi_regime_weight * 2
+                sell_reasons.append("RSI terlalu jenuh jual, short dikurangi")
         if bullish_candle:
             buy_score += 1
             buy_reasons.append("candle hijau")
@@ -1754,6 +1782,7 @@ def generate_auto_signal(symbol: str) -> dict:
             "score_sell": sell_score,
             "trend_interval": trend_interval,
             "trend_rsi": str(trend_rsi.quantize(Decimal("0.01"))),
+            "rsi_regime": rsi_regime,
             "atr": str(atr_now),
             "price_action_concepts": pac,
             "order_book": book,
@@ -1834,131 +1863,132 @@ def cancel_stale_limit_orders(symbols: list[str]) -> None:
             print(f"[CANCEL STALE LIMIT ERROR] {symbol}: {error}")
 
 
+def monitor_open_positions(symbols: list[str]) -> int:
+    position_client = BinanceClient(symbol=symbols[0] if symbols else None)
+    positions = position_client.open_positions()
+    quick_profit_close = env_bool("PROFIT_QUICK_CLOSE", "true")
+    force_close_loss = env_bool("FORCE_CLOSE_LOSS", "true")
+    max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "300"))
+    min_profit_hold_seconds = int(os.getenv("FORCE_CLOSE_MIN_HOLD_SECONDS", "0"))
+    force_close_profit_usdt = Decimal(os.getenv("FORCE_CLOSE_PROFIT_USDT", "0"))
+    force_close_profit_percent = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PERCENT", "0.15"))
+    force_close_loss_usdt = Decimal(os.getenv("FORCE_CLOSE_LOSS_USDT", "0"))
+    force_close_loss_percent = Decimal(os.getenv("FORCE_CLOSE_LOSS_PERCENT", os.getenv("SL_PERCENT", "0.25")))
+    force_close_profit_pips = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PIPS", os.getenv("TAKE_PROFIT_PIPS", "50")))
+    force_close_loss_pips = Decimal(os.getenv("FORCE_CLOSE_LOSS_PIPS", os.getenv("STOP_LOSS_PIPS", "35")))
+    break_even_stop = env_bool("USE_BREAK_EVEN_STOP", "true")
+    break_even_activate_usdt = Decimal(os.getenv("BREAK_EVEN_ACTIVATE_PROFIT_USDT", "0.01"))
+    break_even_lock_usdt = Decimal(os.getenv("BREAK_EVEN_LOCK_PROFIT_USDT", "0.001"))
+    trailing_profit = env_bool("USE_TRAILING_PROFIT_LOCK", "true")
+    trailing_drawdown_usdt = Decimal(os.getenv("TRAILING_PROFIT_DRAWDOWN_USDT", "0.015"))
+
+    open_count = len(positions)
+    active_keys: set[str] = set()
+    for position in positions:
+        try:
+            position_symbol = str(position.get("symbol", "")).upper()
+            position_amount = Decimal(str(position.get("positionAmt", "0")))
+            if not position_symbol or position_amount == 0:
+                continue
+
+            pnl_percent = Decimal(str(position.get("pnlPercent", "0")))
+            pnl_usdt = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
+            side_label = "LONG" if position_amount > 0 else "SHORT"
+            profit_key = f"{position_symbol}:{side_label}"
+            active_keys.add(profit_key)
+            peak_profit = max(POSITION_PROFIT_MEMORY.get(profit_key, pnl_usdt), pnl_usdt)
+            POSITION_PROFIT_MEMORY[profit_key] = peak_profit
+            update_time_ms = int(position.get("updateTime", "0") or "0")
+            hold_seconds = int(time.time() - (update_time_ms / 1000)) if update_time_ms > 0 else max_hold_seconds
+
+            entry_price = Decimal(str(position.get("entryPrice", "0")))
+            mark_price = Decimal(str(position.get("markPrice", "0")))
+            pip_size = symbol_pip_size(position_symbol)
+            price_move = Decimal("0")
+            if entry_price > 0 and mark_price > 0 and pip_size > 0:
+                price_move = (mark_price - entry_price) / pip_size if position_amount > 0 else (entry_price - mark_price) / pip_size
+
+            profit_target_hit = pnl_percent >= force_close_profit_percent
+            if force_close_profit_usdt > 0:
+                profit_target_hit = pnl_usdt >= force_close_profit_usdt
+            if force_close_profit_pips > 0:
+                profit_target_hit = price_move >= force_close_profit_pips
+            profit_hold_ok = hold_seconds >= min_profit_hold_seconds
+            time_exit_ok = (not quick_profit_close) and hold_seconds >= max_hold_seconds
+            loss_limit_hit = force_close_loss and pnl_percent <= -force_close_loss_percent
+            if force_close_loss and force_close_loss_usdt > 0:
+                loss_limit_hit = pnl_usdt <= -force_close_loss_usdt
+            if force_close_loss and force_close_loss_pips > 0:
+                loss_limit_hit = price_move <= -force_close_loss_pips
+            break_even_hit = break_even_stop and peak_profit >= break_even_activate_usdt and pnl_usdt <= break_even_lock_usdt
+            trailing_profit_hit = (
+                trailing_profit
+                and peak_profit >= break_even_activate_usdt
+                and trailing_drawdown_usdt > 0
+                and peak_profit - pnl_usdt >= trailing_drawdown_usdt
+                and pnl_usdt > break_even_lock_usdt
+            )
+
+            if (
+                profit_target_hit and (quick_profit_close and profit_hold_ok or time_exit_ok)
+                or loss_limit_hit
+                or break_even_hit
+                or trailing_profit_hit
+            ):
+                close_client = BinanceClient(symbol=position_symbol)
+                if loss_limit_hit:
+                    close_reason = "LOSS"
+                elif break_even_hit:
+                    close_reason = "BREAK EVEN"
+                elif trailing_profit_hit:
+                    close_reason = "TRAILING PROFIT"
+                else:
+                    close_reason = "PROFIT"
+                print(
+                    f"[FORCE CLOSE {close_reason}] {position_symbol} {side_label} "
+                    f"pnl={pnl_percent}% usdt={pnl_usdt} peak={peak_profit} pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
+                )
+                close_result = close_client.close_position_amount(position_amount)
+                POSITION_PROFIT_MEMORY.pop(profit_key, None)
+                print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
+                send_telegram(
+                    f"<b>FORCE CLOSE {close_reason}</b>\n"
+                    f"{position_symbol} {side_label}\n"
+                    f"PnL: {pnl_percent}% | {pnl_usdt} USDT | Pips: {price_move}\n"
+                    f"Peak: {peak_profit} USDT\n"
+                    f"Result: {json.dumps(close_result, ensure_ascii=False)}"
+                )
+                open_count = max(0, open_count - 1)
+        except Exception as close_error:
+            print(f"[FORCE CLOSE ERROR] {close_error}")
+
+    for key in list(POSITION_PROFIT_MEMORY):
+        if key not in active_keys:
+            POSITION_PROFIT_MEMORY.pop(key, None)
+    return open_count
+
+
 def auto_scalping_loop() -> None:
     interval_seconds = int(os.getenv("SCALPING_INTERVAL", "60"))
+    position_interval_seconds = int(os.getenv("POSITION_MONITOR_INTERVAL_SECONDS", "3"))
+    last_signal_scan_ts = 0
     print("=" * 70)
     print("AUTO SCALPING LOOP START")
     print("Symbols:", os.getenv("SCALPING_SYMBOLS", "XAUUSDT"))
     print("Interval:", interval_seconds, "seconds")
+    print("Position monitor:", position_interval_seconds, "seconds")
     print("=" * 70)
     while True:
         try:
             symbols = configured_scalping_symbols()
-            position_client = BinanceClient(symbol=symbols[0] if symbols else None)
             cancel_stale_limit_orders(symbols)
-            positions = position_client.open_positions()
-            open_count = len(positions)
+            open_count = monitor_open_positions(symbols)
             max_positions = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
-
-            # AUTO FORCE CLOSE PROFIT UNTUK SEMUA POSISI TERBUKA
-            # Jika mode profit cepat aktif, bot tutup market begitu posisi sudah hijau
-            # sesuai target FORCE_CLOSE_PROFIT_USDT / FORCE_CLOSE_PROFIT_PERCENT.
-            # Setting dari .env:
-            # PROFIT_QUICK_CLOSE=true
-            # FORCE_CLOSE_MIN_HOLD_SECONDS=0
-            # FORCE_CLOSE_PROFIT_USDT=3
-            quick_profit_close = env_bool("PROFIT_QUICK_CLOSE", "true")
-            force_close_loss = env_bool("FORCE_CLOSE_LOSS", "true")
-            max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "300"))
-            min_profit_hold_seconds = int(os.getenv("FORCE_CLOSE_MIN_HOLD_SECONDS", "0"))
-            force_close_profit_usdt = Decimal(os.getenv("FORCE_CLOSE_PROFIT_USDT", "0"))
-            force_close_profit_percent = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PERCENT", "0.15"))
-            force_close_loss_usdt = Decimal(os.getenv("FORCE_CLOSE_LOSS_USDT", "0"))
-            force_close_loss_percent = Decimal(os.getenv("FORCE_CLOSE_LOSS_PERCENT", os.getenv("SL_PERCENT", "0.25")))
-            force_close_profit_pips = Decimal(os.getenv("FORCE_CLOSE_PROFIT_PIPS", os.getenv("TAKE_PROFIT_PIPS", "50")))
-            force_close_loss_pips = Decimal(os.getenv("FORCE_CLOSE_LOSS_PIPS", os.getenv("STOP_LOSS_PIPS", "35")))
-            break_even_stop = env_bool("USE_BREAK_EVEN_STOP", "true")
-            break_even_activate_usdt = Decimal(os.getenv("BREAK_EVEN_ACTIVATE_PROFIT_USDT", "0.01"))
-            break_even_lock_usdt = Decimal(os.getenv("BREAK_EVEN_LOCK_PROFIT_USDT", "0.001"))
-            trailing_profit = env_bool("USE_TRAILING_PROFIT_LOCK", "true")
-            trailing_drawdown_usdt = Decimal(os.getenv("TRAILING_PROFIT_DRAWDOWN_USDT", "0.015"))
-
-            for position in positions:
-                try:
-                    position_symbol = str(position.get("symbol", "")).upper()
-                    position_amount = Decimal(str(position.get("positionAmt", "0")))
-                    if not position_symbol or position_amount == 0:
-                        continue
-
-                    pnl_percent = Decimal(str(position.get("pnlPercent", "0")))
-                    pnl_usdt = Decimal(str(position.get("unRealizedProfit", position.get("unrealizedProfit", "0"))))
-                    side_label = "LONG" if position_amount > 0 else "SHORT"
-                    profit_key = f"{position_symbol}:{side_label}"
-                    peak_profit = max(POSITION_PROFIT_MEMORY.get(profit_key, pnl_usdt), pnl_usdt)
-                    POSITION_PROFIT_MEMORY[profit_key] = peak_profit
-                    update_time_ms = int(position.get("updateTime", "0") or "0")
-                    if update_time_ms > 0:
-                        hold_seconds = int(time.time() - (update_time_ms / 1000))
-                    else:
-                        hold_seconds = max_hold_seconds
-
-                    entry_price = Decimal(str(position.get("entryPrice", "0")))
-                    mark_price = Decimal(str(position.get("markPrice", "0")))
-                    pip_size = symbol_pip_size(position_symbol)
-                    price_move = Decimal("0")
-                    if entry_price > 0 and mark_price > 0 and pip_size > 0:
-                        if position_amount > 0:
-                            price_move = (mark_price - entry_price) / pip_size
-                        else:
-                            price_move = (entry_price - mark_price) / pip_size
-
-                    profit_target_hit = pnl_percent >= force_close_profit_percent
-                    if force_close_profit_usdt > 0:
-                        profit_target_hit = pnl_usdt >= force_close_profit_usdt
-                    if force_close_profit_pips > 0:
-                        profit_target_hit = price_move >= force_close_profit_pips
-                    profit_hold_ok = hold_seconds >= min_profit_hold_seconds
-                    time_exit_ok = (not quick_profit_close) and hold_seconds >= max_hold_seconds
-                    loss_limit_hit = force_close_loss and pnl_percent <= -force_close_loss_percent
-                    if force_close_loss and force_close_loss_usdt > 0:
-                        loss_limit_hit = pnl_usdt <= -force_close_loss_usdt
-                    if force_close_loss and force_close_loss_pips > 0:
-                        loss_limit_hit = price_move <= -force_close_loss_pips
-                    break_even_hit = (
-                        break_even_stop
-                        and peak_profit >= break_even_activate_usdt
-                        and pnl_usdt <= break_even_lock_usdt
-                    )
-                    trailing_profit_hit = (
-                        trailing_profit
-                        and peak_profit >= break_even_activate_usdt
-                        and trailing_drawdown_usdt > 0
-                        and peak_profit - pnl_usdt >= trailing_drawdown_usdt
-                        and pnl_usdt > break_even_lock_usdt
-                    )
-
-                    if (
-                        profit_target_hit and (quick_profit_close and profit_hold_ok or time_exit_ok)
-                        or loss_limit_hit
-                        or break_even_hit
-                        or trailing_profit_hit
-                    ):
-                        close_client = BinanceClient(symbol=position_symbol)
-                        if loss_limit_hit:
-                            close_reason = "LOSS"
-                        elif break_even_hit:
-                            close_reason = "BREAK EVEN"
-                        elif trailing_profit_hit:
-                            close_reason = "TRAILING PROFIT"
-                        else:
-                            close_reason = "PROFIT"
-                        print(
-                            f"[FORCE CLOSE {close_reason}] {position_symbol} {side_label} "
-                            f"pnl={pnl_percent}% usdt={pnl_usdt} peak={peak_profit} pips={price_move} hold={hold_seconds}s quick={quick_profit_close}"
-                        )
-                        close_result = close_client.close_position_amount(position_amount)
-                        POSITION_PROFIT_MEMORY.pop(profit_key, None)
-                        print("[FORCE CLOSE RESULT]", json.dumps(close_result, ensure_ascii=False))
-                        send_telegram(
-                            f"<b>FORCE CLOSE {close_reason}</b>\n"
-                            f"{position_symbol} {side_label}\n"
-                            f"PnL: {pnl_percent}% | {pnl_usdt} USDT | Pips: {price_move}\n"
-                            f"Result: {json.dumps(close_result, ensure_ascii=False)}"
-                        )
-                        open_count = max(0, open_count - 1)
-
-                except Exception as close_error:
-                    print(f"[FORCE CLOSE ERROR] {close_error}")
+            now = int(time.time())
+            if now - last_signal_scan_ts < interval_seconds:
+                time.sleep(position_interval_seconds)
+                continue
+            last_signal_scan_ts = now
 
             for symbol in symbols:
                 try:
@@ -2007,10 +2037,10 @@ def auto_scalping_loop() -> None:
                         open_count += 1
                 except Exception as error:
                     print(f"[PAIR ERROR] {symbol}: {error}")
-            time.sleep(interval_seconds)
+            time.sleep(position_interval_seconds)
         except Exception as error:
             print("[AUTO SCALPING ERROR]", error)
-            time.sleep(10)
+            time.sleep(position_interval_seconds)
 
 
 # =========================================================

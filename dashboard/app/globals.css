@@ -524,6 +524,72 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.rsi-meter {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.32);
+}
+
+.rsi-meter-head,
+.rsi-scale,
+.rsi-thresholds {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rsi-meter-head strong {
+  color: #f8fafc;
+  font-size: 13px;
+}
+
+.rsi-meter-head span,
+.rsi-scale,
+.rsi-thresholds {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rsi-track {
+  position: relative;
+  height: 8px;
+  margin: 9px 0 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.28) 0 30%, rgba(148, 163, 184, 0.22) 30% 70%, rgba(248, 113, 113, 0.28) 70% 100%);
+}
+
+.rsi-track i {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: #94a3b8;
+}
+
+.rsi-meter.cold .rsi-track i,
+.rsi-meter.soft .rsi-track i {
+  background: #38bdf8;
+}
+
+.rsi-meter.firm .rsi-track i {
+  background: #34d399;
+}
+
+.rsi-meter.hot .rsi-track i {
+  background: #f87171;
+}
+
+.rsi-thresholds {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
 .signal-trade-button {
   width: 100%;
   min-height: 40px;
@@ -554,13 +620,13 @@ h2 {
 
 .scan-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
   grid-column: 1 / -1;
 }
 
-.scan-strip button {
-  min-height: 64px;
+.scan-rsi-card {
+  min-height: 124px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -569,21 +635,37 @@ h2 {
   text-align: left;
 }
 
-.scan-strip button.active {
+.scan-rsi-card.active {
   border-color: rgba(96, 165, 250, 0.6);
   background: rgba(96, 165, 250, 0.12);
 }
 
-.scan-strip strong,
-.scan-strip span {
-  display: block;
+.scan-rsi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.scan-strip span {
-  margin-top: 4px;
+.scan-rsi-head strong {
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.scan-rsi-head span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.rsi-meter.compact {
+  margin-top: 9px;
+  padding: 8px;
+}
+
+.signal-empty {
+  grid-column: 1 / -1;
 }
 
 .balance-headline {

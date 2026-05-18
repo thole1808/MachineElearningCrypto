@@ -84,6 +84,13 @@ type AutoSignal = {
   score_sell?: number;
   trend_interval?: string;
   trend_rsi?: string;
+  rsi_regime?: {
+    enabled?: boolean;
+    overbought?: string;
+    oversold?: string;
+    long_block_above?: string;
+    short_block_below?: string;
+  };
   atr?: string;
 };
 
@@ -169,6 +176,32 @@ function formatPercent(value?: string) {
 
 function signalScore(signal?: AutoSignal | null) {
   return Math.max(Number(signal?.score_buy ?? 0), Number(signal?.score_sell ?? 0));
+}
+
+function rsiTone(value?: string) {
+  const rsi = Number(value ?? 0);
+  if (!Number.isFinite(rsi)) return "neutral";
+  if (rsi >= 70) return "hot";
+  if (rsi <= 30) return "cold";
+  if (rsi >= 60) return "firm";
+  if (rsi <= 40) return "soft";
+  return "neutral";
+}
+
+function rsiLabel(value?: string) {
+  const rsi = Number(value ?? 0);
+  if (!Number.isFinite(rsi)) return "RSI -";
+  if (rsi >= 70) return "Overbought";
+  if (rsi <= 30) return "Oversold";
+  if (rsi >= 60) return "Bullish";
+  if (rsi <= 40) return "Bearish";
+  return "Neutral";
+}
+
+function rsiWidth(value?: string) {
+  const rsi = Number(value ?? 0);
+  if (!Number.isFinite(rsi)) return 0;
+  return Math.max(0, Math.min(100, rsi));
 }
 
 function formatUsd(value?: string) {
@@ -689,6 +722,8 @@ export default function Home() {
                 const confidence = Math.max(0, Math.min(100, Math.round((score / aiScoreMax) * 100)));
                 const isTrading = tradeLoadingSymbol === signal.symbol;
                 const isStrongSignal = score >= strongSignalThreshold;
+                const rsiStatus = rsiLabel(signal.rsi);
+                const rsiState = rsiTone(signal.rsi);
                 return (
                   <article className={`signal-card ${signal.signal === "BUY" ? "buy" : "sell"}`} key={signal.symbol}>
                     <div className="signal-card-head">
@@ -700,6 +735,26 @@ export default function Home() {
                       <span>Score {score}/{aiScoreMax}</span>
                       <span>AI {confidence}%</span>
                       <span>RSI {signal.rsi}</span>
+                    </div>
+                    <div className={`rsi-meter ${rsiState}`}>
+                      <div className="rsi-meter-head">
+                        <strong>{rsiStatus}</strong>
+                        <span>{signal.interval} RSI {signal.rsi}</span>
+                      </div>
+                      <div className="rsi-track">
+                        <i style={{ width: `${rsiWidth(signal.rsi)}%` }} />
+                      </div>
+                      <div className="rsi-scale">
+                        <span>30 OS</span>
+                        <span>{signal.trend_interval || "Trend"} {signal.trend_rsi ? `RSI ${signal.trend_rsi}` : "RSI -"}</span>
+                        <span>70 OB</span>
+                      </div>
+                      {signal.rsi_regime?.enabled ? (
+                        <div className="rsi-thresholds">
+                          <span>Block L {signal.rsi_regime.long_block_above || "72"}</span>
+                          <span>Block S {signal.rsi_regime.short_block_below || "28"}</span>
+                        </div>
+                      ) : null}
                     </div>
                     <p>{signal.reason}</p>
                     <button
@@ -715,20 +770,44 @@ export default function Home() {
               })
             ) : (
               <div className="scan-strip">
-                {watchSignals.map((signal) => (
-                  <button
-                    className={signal.symbol === autoSignal?.symbol ? "active" : ""}
-                    key={signal.symbol}
-                    type="button"
-                    onClick={() => {
-                      setAutoSignal(signal);
-                      setSelectedSymbol(signal.symbol);
-                    }}
-                  >
-                    <strong>{signal.symbol}</strong>
-                    <span>{signalScore(signal)}/{aiScoreMax}</span>
-                  </button>
-                ))}
+                {watchSignals.length ? (
+                  watchSignals.map((signal) => {
+                    const rsiStatus = rsiLabel(signal.rsi);
+                    const rsiState = rsiTone(signal.rsi);
+                    return (
+                      <button
+                        className={`scan-rsi-card ${signal.symbol === autoSignal?.symbol ? "active" : ""}`}
+                        key={signal.symbol}
+                        type="button"
+                        onClick={() => {
+                          setAutoSignal(signal);
+                          setSelectedSymbol(signal.symbol);
+                        }}
+                      >
+                        <div className="scan-rsi-head">
+                          <strong>{signal.symbol}</strong>
+                          <span>{signalScore(signal)}/{aiScoreMax}</span>
+                        </div>
+                        <div className={`rsi-meter compact ${rsiState}`}>
+                          <div className="rsi-meter-head">
+                            <strong>{rsiStatus}</strong>
+                            <span>{signal.interval} RSI {signal.rsi}</span>
+                          </div>
+                          <div className="rsi-track">
+                            <i style={{ width: `${rsiWidth(signal.rsi)}%` }} />
+                          </div>
+                          <div className="rsi-scale">
+                            <span>30</span>
+                            <span>{signal.trend_rsi ? `Trend ${signal.trend_rsi}` : "Trend -"}</span>
+                            <span>70</span>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <div className="empty signal-empty">Belum ada data RSI dari backend.</div>
+                )}
               </div>
             )}
           </div>
