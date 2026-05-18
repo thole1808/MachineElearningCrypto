@@ -50,6 +50,17 @@ type OpenPosition = {
   positionSide?: string;
 };
 
+type OpenOrder = {
+  symbol?: string;
+  side?: string;
+  type?: string;
+  price?: string;
+  origQty?: string;
+  executedQty?: string;
+  status?: string;
+  clientOrderId?: string;
+};
+
 type BinanceStatus = {
   mode: string;
   symbol: string;
@@ -62,6 +73,7 @@ type BinanceStatus = {
   balances?: Balance[];
   balance_summary?: BalanceSummary;
   open_positions?: OpenPosition[];
+  open_orders?: OpenOrder[];
   account_error?: string;
 };
 
@@ -92,11 +104,23 @@ type AutoSignal = {
     short_block_below?: string;
   };
   atr?: string;
+  stale?: boolean;
+};
+
+type SignalDiagnostic = {
+  symbol: string;
+  trigger_ok: boolean;
+  trigger_reason: string;
+  can_enter: boolean;
+  can_enter_reason: string;
+  auto_trade_enabled: boolean;
+  auto_scalping_enabled: boolean;
 };
 
 type MultiSignalItem = {
   ok: boolean;
   signal?: AutoSignal;
+  diagnostic?: SignalDiagnostic;
   symbol?: string;
   error?: string;
 };
@@ -176,6 +200,19 @@ function formatPercent(value?: string) {
 
 function signalScore(signal?: AutoSignal | null) {
   return Math.max(Number(signal?.score_buy ?? 0), Number(signal?.score_sell ?? 0));
+}
+
+function signalSummary(signal?: AutoSignal | null, diagnostic?: SignalDiagnostic) {
+  if (!signal) return "Belum ada data signal dari backend.";
+  if (signal.signal) {
+    if (!diagnostic?.trigger_ok) return diagnostic?.trigger_reason || signal.reason;
+    if (!diagnostic?.can_enter) return diagnostic?.can_enter_reason || signal.reason;
+    return signal.reason;
+  }
+  if (signal.stale) return signal.reason;
+  return signal.reason.startsWith("NO SIGNAL:")
+    ? signal.reason.replace("NO SIGNAL:", "Belum entry:")
+    : signal.reason;
 }
 
 function rsiTone(value?: string) {
@@ -350,6 +387,7 @@ export default function Home() {
   const [balanceCurrency, setBalanceCurrency] = useState<BalanceCurrency>("USDT");
   const [autoSignal, setAutoSignal] = useState<AutoSignal | null>(null);
   const [autoSignals, setAutoSignals] = useState<AutoSignal[]>([]);
+  const [signalDiagnostics, setSignalDiagnostics] = useState<Record<string, SignalDiagnostic>>({});
   const [signalSymbols, setSignalSymbols] = useState<string[]>(fallbackSignalSymbols);
   const [hideBalance, setHideBalance] = useState(false);
   const [tradeLoadingSymbol, setTradeLoadingSymbol] = useState("");
@@ -423,11 +461,18 @@ export default function Home() {
       const failedSignals = body.signals
         .filter((item) => !item.ok || item.error)
         .map((item) => `${item.symbol || "PAIR"}: ${item.error || "gagal membaca signal"}`);
+      const diagnosticMap: Record<string, SignalDiagnostic> = {};
+      for (const item of body.signals) {
+        if (item.signal?.symbol && item.diagnostic) {
+          diagnosticMap[item.signal.symbol] = item.diagnostic;
+        }
+      }
       const signals = body.signals
         .map((item) => item.signal)
         .filter((item): item is AutoSignal => Boolean(item))
         .sort((left, right) => signalScore(right) - signalScore(left));
       setAutoSignals(signals);
+      setSignalDiagnostics(diagnosticMap);
       setAutoSignal(signals.find((item) => item.symbol === selectedSymbol) || signals[0] || null);
       setSignalError(
         failedSignals.length
@@ -549,6 +594,37 @@ export default function Home() {
     }
   }, [checkBinance]);
 
+  const executeManualTrade = useCallback(async (symbol: string, side: "BUY" | "SELL") => {
+    const confirmed = window.confirm(`Buka ${side} manual untuk ${symbol}?`);
+    if (!confirmed) return;
+    setTradeLoadingSymbol(`${symbol}:${side}`);
+    setTradeMessage("");
+    try {
+      const response = await fetch("/api/auto-signal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol,
+          side,
+          usdt: process.env.NEXT_PUBLIC_ORDER_USDT || "5",
+          leverage: process.env.NEXT_PUBLIC_DEFAULT_LEVERAGE || "5",
+          entry_order_type: "MARKET",
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok || !body.ok) {
+        throw new Error(body.error || body.result?.reason || `${side} manual gagal dikirim.`);
+      }
+      const result = body.result;
+      setTradeMessage(result?.accepted ? `${symbol} ${side} manual terkirim.` : `${symbol}: ${result?.reason || "Order manual tidak diterima."}`);
+      checkBinance();
+    } catch (caught) {
+      setTradeMessage(caught instanceof Error ? caught.message : "Terjadi error saat kirim order manual.");
+    } finally {
+      setTradeLoadingSymbol("");
+    }
+  }, [checkBinance]);
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       checkBinance();
@@ -610,6 +686,12 @@ export default function Home() {
     return selectedSymbol;
   }, [activeChartSymbol, openPositions, selectedSymbol]);
   const futuresBalances = status?.balances || [];
+  const openOrders = status?.open_orders || [];
+  const visibleOpenOrders = openOrders.filter((order) => {
+    const symbolMatch = (order.symbol || "").toUpperCase() === chartSymbol.toUpperCase();
+    const isWorking = ["NEW", "PARTIALLY_FILLED"].includes((order.status || "").toUpperCase());
+    return symbolMatch && isWorking;
+  });
   const visibleFuturesBalances = futuresBalances.filter((balance) => {
     const wallet = Number(balance.walletUsdt ?? balance.walletBalance ?? 0);
     const margin = Number(balance.marginUsdt ?? balance.marginBalance ?? 0);
@@ -747,9 +829,12 @@ export default function Home() {
                   const score = signalScore(signal);
                   const confidence = Math.max(0, Math.min(100, Math.round((score / aiScoreMax) * 100)));
                   const isTrading = tradeLoadingSymbol === signal.symbol;
+                  const isManualBuyLoading = tradeLoadingSymbol === `${signal.symbol}:BUY`;
+                  const isManualSellLoading = tradeLoadingSymbol === `${signal.symbol}:SELL`;
                   const isStrongSignal = score >= strongSignalThreshold;
                   const rsiStatus = rsiLabel(signal.rsi);
                   const rsiState = rsiTone(signal.rsi);
+                  const diagnostic = signalDiagnostics[signal.symbol];
                   return (
                     <article className={`signal-card ${signal.signal === "BUY" ? "buy" : "sell"}`} key={signal.symbol}>
                       <div className="signal-card-head">
@@ -782,7 +867,7 @@ export default function Home() {
                           </div>
                         ) : null}
                       </div>
-                      <p>{signal.reason}</p>
+                      <p>{signalSummary(signal, diagnostic)}</p>
                       <button
                         className={`signal-trade-button ${signal.signal === "BUY" ? "buy" : "sell"}`}
                         disabled={isTrading || !isStrongSignal}
@@ -791,6 +876,24 @@ export default function Home() {
                       >
                         {isTrading ? "Sending" : isStrongSignal ? `Entry ${signal.signal}` : `Wait Strong ${score}/${strongSignalThreshold}`}
                       </button>
+                      <div className="manual-trade-row">
+                        <button
+                          className="signal-trade-button buy secondary-trade-button"
+                          disabled={isManualBuyLoading}
+                          type="button"
+                          onClick={() => executeManualTrade(signal.symbol, "BUY")}
+                        >
+                          {isManualBuyLoading ? "Sending" : "Manual BUY"}
+                        </button>
+                        <button
+                          className="signal-trade-button sell secondary-trade-button"
+                          disabled={isManualSellLoading}
+                          type="button"
+                          onClick={() => executeManualTrade(signal.symbol, "SELL")}
+                        >
+                          {isManualSellLoading ? "Sending" : "Manual SELL"}
+                        </button>
+                      </div>
                     </article>
                   );
                 })
@@ -800,17 +903,21 @@ export default function Home() {
                     watchSignals.map((signal) => {
                       const rsiStatus = rsiLabel(signal.rsi);
                       const rsiState = rsiTone(signal.rsi);
+                      const diagnostic = signalDiagnostics[signal.symbol];
                       return (
-                        <button
+                        <article
                           className={`scan-rsi-card ${signal.symbol === autoSignal?.symbol ? "active" : ""}`}
                           key={signal.symbol}
-                          type="button"
-                          onClick={() => {
-                            setAutoSignal(signal);
-                            setSelectedSymbol(signal.symbol);
-                            setActiveChartSymbol(signal.symbol);
-                          }}
                         >
+                          <button
+                            className="scan-rsi-select"
+                            type="button"
+                            onClick={() => {
+                              setAutoSignal(signal);
+                              setSelectedSymbol(signal.symbol);
+                              setActiveChartSymbol(signal.symbol);
+                            }}
+                          >
                           <div className="scan-rsi-head">
                             <strong>{signal.symbol}</strong>
                             <span>{signalScore(signal)}/{aiScoreMax}</span>
@@ -829,7 +936,27 @@ export default function Home() {
                               <span>70</span>
                             </div>
                           </div>
-                        </button>
+                          <p className="scan-rsi-reason">{signalSummary(signal, diagnostic)}</p>
+                          </button>
+                          <div className="manual-trade-row compact-manual-row">
+                            <button
+                              className="signal-trade-button buy secondary-trade-button"
+                              disabled={tradeLoadingSymbol === `${signal.symbol}:BUY`}
+                              type="button"
+                              onClick={() => executeManualTrade(signal.symbol, "BUY")}
+                            >
+                              {tradeLoadingSymbol === `${signal.symbol}:BUY` ? "Sending" : "Manual BUY"}
+                            </button>
+                            <button
+                              className="signal-trade-button sell secondary-trade-button"
+                              disabled={tradeLoadingSymbol === `${signal.symbol}:SELL`}
+                              type="button"
+                              onClick={() => executeManualTrade(signal.symbol, "SELL")}
+                            >
+                              {tradeLoadingSymbol === `${signal.symbol}:SELL` ? "Sending" : "Manual SELL"}
+                            </button>
+                          </div>
+                        </article>
                       );
                     })
                   ) : (
@@ -987,6 +1114,21 @@ export default function Home() {
                 <p>Entry, mark, target TP/SL, ROE, dan liquidation refresh tiap {positionRefreshMs / 1000} detik.</p>
               </div>
             </header>
+            {visibleOpenOrders.length ? (
+              <div className="pending-orders-banner">
+                <strong>Pending Limit Order</strong>
+                <div className="pending-orders-grid">
+                  {visibleOpenOrders.map((order) => (
+                    <div className="pending-order-card" key={`${order.clientOrderId || "order"}-${order.price || "0"}`}>
+                      <span>{order.side} {order.type}</span>
+                      <strong>{formatPrice(order.price)}</strong>
+                      <span>Qty {formatNumber(order.origQty)}</span>
+                      <span>Status {order.status || "-"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {positionMessage ? <div className="alert compact">{positionMessage}</div> : null}
             {openPositions.length ? (
               <div className="positions-table">

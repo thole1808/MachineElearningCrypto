@@ -987,6 +987,7 @@ class BinanceClient:
                     result["balances"] = balances
                     result["balance_summary"] = self.futures_account_summary(account, balances)
                     result["open_positions"] = self.open_positions()
+                    result["open_orders"] = self.open_orders(self.symbol)
                 else:
                     result["balances"] = [
                         bal
@@ -1025,6 +1026,7 @@ class BinanceClient:
                 "auto_scalping": auto_scalping_enabled(),
                 "balances": [],
                 "open_positions": [],
+                "open_orders": self.open_orders(self.symbol),
                 "account_error": str(error),
                 "server_time": {"serverTime": int(time.time() * 1000)},
             }
@@ -1332,7 +1334,8 @@ class BinanceClient:
         quantity = self.calculate_quantity(usdt_amount)
         leverage_result = self.set_leverage(leverage)
         entry_price = self.get_price()
-        entry_order_type = os.getenv("ENTRY_ORDER_TYPE", "MARKET").strip().upper()
+        payload_order_type = str(payload.get("entry_order_type", "")).strip().upper()
+        entry_order_type = payload_order_type or os.getenv("ENTRY_ORDER_TYPE", "MARKET").strip().upper()
         if entry_order_type == "LIMIT":
             limit_price = self.entry_limit_price(side, entry_price)
             client_order_id = f"mecbot_{self.symbol}_{side.lower()}_{int(time.time())}"
@@ -2575,15 +2578,19 @@ class BotHandler(SimpleHTTPRequestHandler):
                 )
                 return
             symbol = normalize_symbol(str(body.get("symbol", os.getenv("TRADE_SYMBOL", "XAUUSDT"))))
-            signal_info = cached_auto_signal(symbol, force_refresh=True)
-            side = signal_info.get("signal")
-            if not side:
-                self.send_json({"ok": False, "error": signal_info.get("reason", "NO SIGNAL"), "signal": signal_info}, status=400)
-                return
-            trigger_ok, trigger_reason = score_trigger_ok(signal_info)
-            if not trigger_ok:
-                self.send_json({"ok": False, "error": trigger_reason, "signal": signal_info}, status=400)
-                return
+            requested_side = str(body.get("side", "")).strip().upper()
+            signal_info = None
+            side = requested_side
+            if side not in {"BUY", "SELL", "LONG", "SHORT"}:
+                signal_info = cached_auto_signal(symbol, force_refresh=True)
+                side = str(signal_info.get("signal", "")).upper()
+                if not side:
+                    self.send_json({"ok": False, "error": signal_info.get("reason", "NO SIGNAL"), "signal": signal_info}, status=400)
+                    return
+                trigger_ok, trigger_reason = score_trigger_ok(signal_info)
+                if not trigger_ok:
+                    self.send_json({"ok": False, "error": trigger_reason, "signal": signal_info}, status=400)
+                    return
             client = BinanceClient(symbol=symbol)
             payload = {
                 "symbol": symbol,
@@ -2593,9 +2600,9 @@ class BotHandler(SimpleHTTPRequestHandler):
             }
             try:
                 result = client.handle_webhook_signal(payload)
-                self.send_json({"ok": True, "signal": signal_info, "result": result})
+                self.send_json({"ok": True, "signal": signal_info, "manual_side": requested_side or side, "result": result})
             except Exception as error:
-                self.send_json({"ok": False, "error": str(error), "signal": signal_info}, status=400)
+                self.send_json({"ok": False, "error": str(error), "signal": signal_info, "manual_side": requested_side or side}, status=400)
             return
         if parsed.path != "/api/chat":
             self.send_error(404, "Not found")

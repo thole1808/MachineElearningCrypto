@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
         if (!response.ok || !body.ok) {
           signals.push({ symbol: item, ok: false, error: body.error || "Gagal membaca signal." });
         } else {
-          signals.push({ ok: true, signal: body.signal });
+          signals.push({ ok: true, signal: body.signal, diagnostic: body.diagnostic });
         }
       }
 
