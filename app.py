@@ -29,6 +29,58 @@ def get_websocket_ssl_context():
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
+import socket
+
+DNS_LOCK = threading.Lock()
+RESOLVED_CACHE = {}
+
+def resolve_doh(host: str) -> list[str]:
+    if host in RESOLVED_CACHE:
+        return RESOLVED_CACHE[host]
+    url = f"https://cloudflare-dns.com/dns-query?name={host}&type=A"
+    req = urllib.request.Request(url, headers={"accept": "application/dns-json"})
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            ips = []
+            for answer in data.get("Answer", []):
+                if answer.get("type") == 1:
+                    ip = answer.get("data")
+                    if ip:
+                        ips.append(ip)
+            if ips:
+                print(f"[DoH RESOLVER] Sukses meresolusi {host} -> {ips}")
+                RESOLVED_CACHE[host] = ips
+                return ips
+    except Exception as e:
+        print(f"[DoH RESOLVER WARNING] Gagal meresolusi {host} via DoH: {e}")
+    return []
+
+_original_getaddrinfo = socket.getaddrinfo
+
+def custom_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host in {"fapi.binance.com", "fstream.binance.com", "api.binance.com", "stream.binance.com"}:
+        ips = []
+        with DNS_LOCK:
+            ips = resolve_doh(host)
+        if ips:
+            results = []
+            for ip in ips:
+                try:
+                    res = _original_getaddrinfo(ip, port, family, type, proto, flags)
+                    if res:
+                        results.extend(res)
+                except Exception:
+                    pass
+            if results:
+                return results
+    return _original_getaddrinfo(host, port, family, type, proto, flags)
+
+socket.getaddrinfo = custom_getaddrinfo
+
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 DATA_DIR = ROOT / "data"
