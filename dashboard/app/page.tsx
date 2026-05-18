@@ -248,13 +248,18 @@ function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timefra
 
     const initWidget = () => {
       if (typeof window !== "undefined" && (window as any).TradingView) {
-        let formattedSymbol = symbol;
-        if (!symbol.includes(":")) {
-          formattedSymbol = `BINANCE:${symbol.toUpperCase()}`;
+        let formattedSymbol = symbol.toUpperCase();
+        if (!formattedSymbol.includes(":")) {
+          if (formattedSymbol.endsWith("USDT")) {
+            formattedSymbol = `BINANCE:${formattedSymbol}.P`;
+          } else {
+            formattedSymbol = `BINANCE:${formattedSymbol}`;
+          }
         }
 
         new (window as any).TradingView.widget({
-          autosize: true,
+          width: "100%",
+          height: 550,
           symbol: formattedSymbol,
           interval: timeframe,
           timezone: "Asia/Jakarta",
@@ -300,8 +305,8 @@ function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timefra
   }, [symbol, timeframe]);
 
   return (
-    <div style={{ height: "100%", width: "100%", minHeight: "450px" }} className="tradingview-chart-container">
-      <div ref={containerRef} style={{ height: "100%", width: "100%", minHeight: "450px" }} />
+    <div style={{ height: "550px", width: "100%" }} className="tradingview-chart-container">
+      <div ref={containerRef} style={{ height: "550px", width: "100%" }} />
     </div>
   );
 }
@@ -328,6 +333,7 @@ export default function Home() {
   const [tpLoadingSymbol, setTpLoadingSymbol] = useState("");
   const [positionMessage, setPositionMessage] = useState("");
   const [chartTimeframe, setChartTimeframe] = useState("5");
+  const [activeChartSymbol, setActiveChartSymbol] = useState<string | null>(null);
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -550,11 +556,14 @@ export default function Home() {
 
   const openPositions = status?.open_positions || [];
   const chartSymbol = useMemo(() => {
+    if (activeChartSymbol) {
+      return activeChartSymbol;
+    }
     if (openPositions.length > 0) {
       return openPositions[0].symbol;
     }
     return selectedSymbol;
-  }, [openPositions, selectedSymbol]);
+  }, [activeChartSymbol, openPositions, selectedSymbol]);
   const futuresBalances = status?.balances || [];
   const visibleFuturesBalances = futuresBalances.filter((balance) => {
     const wallet = Number(balance.walletUsdt ?? balance.walletBalance ?? 0);
@@ -746,9 +755,21 @@ export default function Home() {
                 const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
                 const pnl = Number(pnlValue);
                 const isTpLoading = tpLoadingSymbol === position.symbol;
+                const isCurrentChart = position.symbol === chartSymbol;
                 return (
-                  <div className="positions-row" key={position.symbol}>
-                    <strong>{position.symbol}</strong>
+                  <div 
+                    className={`positions-row ${isCurrentChart ? "active-chart-row" : ""}`} 
+                    key={position.symbol}
+                    onClick={() => setActiveChartSymbol(position.symbol)}
+                    style={{ cursor: "pointer" }}
+                    title={`Klik untuk menampilkan grafik live ${position.symbol}`}
+                  >
+                    <strong>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                        {isCurrentChart && <span className="chart-symbol-pulse" style={{ width: "6px", height: "6px" }}></span>}
+                        {position.symbol}
+                      </span>
+                    </strong>
                     <span className={amount >= 0 ? "up" : "down"}>{position.positionSide && position.positionSide !== "BOTH" ? position.positionSide : amount >= 0 ? "LONG" : "SHORT"}</span>
                     <span>{formatNumber(position.positionAmt)}</span>
                     <span>{formatPrice(position.entryPrice)}</span>
@@ -762,7 +783,10 @@ export default function Home() {
                       className="tp-now-button"
                       disabled={pnl <= 0 || isTpLoading}
                       type="button"
-                      onClick={() => takeProfitNow(position)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        takeProfitNow(position);
+                      }}
                     >
                       {isTpLoading ? "Closing" : pnl > 0 ? "TP Now" : "Wait Profit"}
                     </button>
@@ -917,6 +941,7 @@ export default function Home() {
                         onClick={() => {
                           setAutoSignal(signal);
                           setSelectedSymbol(signal.symbol);
+                          setActiveChartSymbol(signal.symbol);
                         }}
                       >
                         <div className="scan-rsi-head">

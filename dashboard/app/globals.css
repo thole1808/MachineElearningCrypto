@@ -854,3 +854,9 @@ h2 {
   border: 1px solid var(--line);
   background: rgba(0, 0, 0, 0.4);
 }
+
+.positions-row.active-chart-row {
+  background: rgba(56, 189, 248, 0.06) !important;
+  border-left: 3px solid #38bdf8;
+  padding-left: 13px;
+}
