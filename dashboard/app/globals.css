@@ -303,13 +303,23 @@ h2 {
 }
 
 .workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.terminal-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 480px;
-  grid-template-areas:
-    "positions positions"
-    "signal account";
+  grid-template-columns: minmax(300px, 380px) 1fr;
   gap: 24px;
   align-items: start;
+}
+
+.terminal-sidebar,
+.terminal-main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .panel {
@@ -317,16 +327,15 @@ h2 {
 }
 
 .positions-panel {
-  grid-area: positions;
   min-height: 340px;
 }
 
 .account-panel {
-  grid-area: account;
+  width: 100%;
 }
 
 .signal-panel {
-  grid-area: signal;
+  width: 100%;
 }
 
 .panel-head {
@@ -726,16 +735,8 @@ h2 {
 }
 
 @media (max-width: 1200px) {
-  .summary-grid,
-  .workspace {
+  .summary-grid {
     grid-template-columns: 1fr;
-  }
-
-  .workspace {
-    grid-template-areas:
-      "positions"
-      "account"
-      "signal";
   }
 }
 
@@ -778,7 +779,50 @@ h2 {
 .chart-controls {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.chart-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chart-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-control-label {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.chart-layout-input {
+  width: 110px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  outline: none;
+  background: rgba(15, 23, 42, 0.6);
+  color: #fff;
+  font-size: 12px;
+}
+
+.chart-layout-input:focus {
+  border-color: rgba(56, 189, 248, 0.5);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+}
+
+.tradingview-chart-container,
+.tradingview-chart-frame {
+  width: 100%;
+  height: 580px;
 }
 
 .chart-symbol-badge {
@@ -793,6 +837,28 @@ h2 {
   font-weight: 700;
   font-size: 14px;
   text-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+}
+
+.chart-symbol-badge-futures {
+  gap: 6px;
+  background: rgba(240, 185, 11, 0.1);
+  border-color: rgba(240, 185, 11, 0.25);
+  color: #f0b90b;
+}
+
+.chart-symbol-pulse-futures {
+  background: #f0b90b;
+  box-shadow: 0 0 8px #f0b90b;
+}
+
+.chart-symbol-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.chart-symbol-divider {
+  opacity: 0.5;
 }
 
 .chart-symbol-pulse {
@@ -851,12 +917,82 @@ h2 {
 .chart-wrapper {
   border-radius: 12px;
   overflow: hidden;
-  border: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid #2b3139;
+  background: #161a1e;
+}
+
+.chart-loading {
+  height: 580px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.chart-loading-pulse {
+  width: 32px;
+  height: 32px;
+  margin-bottom: 16px;
+}
+
+.chart-loading-text {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+}
+
+.chart-tip {
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(30, 41, 59, 0.4);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.chart-tip-icon {
+  color: #facc15;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: 999px;
+  padding: 4px 8px;
 }
 
 .positions-row.active-chart-row {
   background: rgba(56, 189, 248, 0.06) !important;
   border-left: 3px solid #38bdf8;
   padding-left: 13px;
+}
+
+@media (max-width: 1100px) {
+  .terminal-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .chart-controls {
+    gap: 10px;
+  }
+
+  .chart-input-group {
+    width: 100%;
+  }
+
+  .chart-layout-input {
+    width: 100%;
+  }
+
+  .timeframe-selector {
+    overflow-x: auto;
+    max-width: 100%;
+  }
 }

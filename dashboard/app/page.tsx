@@ -234,7 +234,7 @@ function toneClass(value?: string) {
   return "";
 }
 
-function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timeframe?: string }) {
+function TradingViewChart({ symbol, timeframe = "5", layoutId = "" }: { symbol: string; timeframe?: string; layoutId?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -261,9 +261,9 @@ function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timefra
           }
         }
 
-        new (window as any).TradingView.widget({
+        const widgetConfig: any = {
           width: "100%",
-          height: 550,
+          height: 580,
           symbol: formattedSymbol,
           interval: timeframe,
           timezone: "Asia/Jakarta",
@@ -281,7 +281,30 @@ function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timefra
           show_popup_button: true,
           popup_width: "1000",
           popup_height: "650",
-        });
+          overrides: {
+            "paneProperties.background": "#161a1e",
+            "paneProperties.backgroundType": "solid",
+            "paneProperties.vertGridProperties.color": "rgba(43, 49, 57, 0.4)",
+            "paneProperties.horzGridProperties.color": "rgba(43, 49, 57, 0.4)",
+            "symbolWatermarkProperties.transparency": 90,
+            "scalesProperties.textColor": "#848e9c",
+            "mainSeriesProperties.candleStyle.upColor": "#0ecb81",
+            "mainSeriesProperties.candleStyle.downColor": "#f6465d",
+            "mainSeriesProperties.candleStyle.drawWick": true,
+            "mainSeriesProperties.candleStyle.drawBorder": true,
+            "mainSeriesProperties.candleStyle.borderColor": "#2b3139",
+            "mainSeriesProperties.candleStyle.borderUpColor": "#0ecb81",
+            "mainSeriesProperties.candleStyle.borderDownColor": "#f6465d",
+            "mainSeriesProperties.candleStyle.wickUpColor": "#0ecb81",
+            "mainSeriesProperties.candleStyle.wickDownColor": "#f6465d",
+          }
+        };
+
+        if (layoutId && layoutId.trim() !== "") {
+          widgetConfig.chart = layoutId.trim();
+        }
+
+        new (window as any).TradingView.widget(widgetConfig);
       }
     };
 
@@ -306,11 +329,11 @@ function TradingViewChart({ symbol, timeframe = "5" }: { symbol: string; timefra
         script.removeEventListener("load", initWidget);
       }
     };
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, layoutId]);
 
   return (
-    <div style={{ height: "550px", width: "100%" }} className="tradingview-chart-container">
-      <div ref={containerRef} style={{ height: "550px", width: "100%" }} />
+    <div className="tradingview-chart-container">
+      <div ref={containerRef} className="tradingview-chart-frame" />
     </div>
   );
 }
@@ -338,6 +361,15 @@ export default function Home() {
   const [positionMessage, setPositionMessage] = useState("");
   const [chartTimeframe, setChartTimeframe] = useState("5");
   const [activeChartSymbol, setActiveChartSymbol] = useState<string | null>(null);
+  const [layoutId, setLayoutId] = useState(() => {
+    if (typeof window === "undefined") return "W4YOe0Vx";
+    return localStorage.getItem("tv_layout_id") || "W4YOe0Vx";
+  });
+
+  const handleSaveLayoutId = (val: string) => {
+    setLayoutId(val);
+    localStorage.setItem("tv_layout_id", val);
+  };
 
   const serverTime = useMemo(() => {
     const value = status?.server_time?.serverTime;
@@ -690,307 +722,335 @@ export default function Home() {
         </article>
       </section>
 
-      {/* Live Chart & Candlesticks Panel */}
-      <section className="panel glass chart-panel">
-        <header className="panel-head chart-header">
-          <div>
-            <h2 style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-              Live Chart & Candlesticks
-              <div className="chart-symbol-badge">
-                <span className="chart-symbol-pulse"></span>
-                {chartSymbol}
+      <div className="terminal-layout">
+        <aside className="terminal-sidebar">
+          {/* Signal Panel (Auto Signals & Scan) */}
+          <section className="panel glass signal-panel">
+            <header className="panel-head">
+              <div>
+                <h2>Signal</h2>
+                <p>Scan {signalSymbols.length} pair, refresh tiap {signalRefreshMs / 1000} detik.</p>
               </div>
-            </h2>
-            <p>
-              {openPositions.length > 0
-                ? "Menampilkan grafik entry yang sedang berjalan secara live."
-                : "Pilih koin di panel scan untuk menampilkan grafiknya."}
-            </p>
-          </div>
-          <div className="chart-controls">
-            <span style={{ fontSize: "12px", color: "var(--muted)", fontWeight: "600" }}>TIMEFRAME:</span>
-            <div className="timeframe-selector" aria-label="Pilih timeframe chart">
-              {[
-                { label: "1m", value: "1" },
-                { label: "3m", value: "3" },
-                { label: "5m", value: "5" },
-                { label: "15m", value: "15" },
-                { label: "30m", value: "30" },
-                { label: "1H", value: "60" },
-                { label: "4H", value: "240" },
-                { label: "1D", value: "D" },
-              ].map((tf) => (
-                <button
-                  className={chartTimeframe === tf.value ? "active" : ""}
-                  key={tf.value}
-                  type="button"
-                  onClick={() => setChartTimeframe(tf.value)}
-                >
-                  {tf.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </header>
-        <div className="chart-wrapper">
-          {checked ? (
-            <TradingViewChart symbol={chartSymbol} timeframe={chartTimeframe} />
-          ) : (
-            <div style={{ height: "550px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(15, 23, 42, 0.4)" }}>
-              <div className="chart-symbol-pulse" style={{ width: "32px", height: "32px", marginBottom: "16px" }}></div>
-              <span style={{ color: "var(--muted)", fontWeight: "600", fontSize: "14px", letterSpacing: "0.5px" }}>LOADING MARKET DATA...</span>
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section className="workspace">
-        <section className="panel glass positions-panel">
-          <header className="panel-head">
-            <div>
-              <h2>Open Positions</h2>
-              <p>Entry, mark, target TP/SL, ROE, dan liquidation refresh tiap {positionRefreshMs / 1000} detik.</p>
-            </div>
-          </header>
-          {positionMessage ? <div className="alert compact">{positionMessage}</div> : null}
-          {openPositions.length ? (
-            <div className="positions-table">
-              <div className="positions-row positions-head">
-                <span>Pair</span>
-                <span>Side</span>
-                <span>Qty</span>
-                <span>Entry</span>
-                <span>Mark</span>
-                <span>PnL</span>
-                <span>ROE</span>
-                <span>TP</span>
-                <span>SL</span>
-                <span>Liq.</span>
-                <span>Action</span>
+              <div className="signal-actions">
+                <strong className={activeSignalCards.length ? "signal-badge buy" : "signal-badge"}>
+                  {activeSignalCards.length ? `${activeSignalCards.length} SIGNAL` : "NO SIGNAL"}
+                </strong>
               </div>
-              {openPositions.map((position) => {
-                const amount = Number(position.positionAmt);
-                const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
-                const pnl = Number(pnlValue);
-                const isTpLoading = tpLoadingSymbol === position.symbol;
-                const isCurrentChart = position.symbol === chartSymbol;
-                return (
-                  <div 
-                    className={`positions-row ${isCurrentChart ? "active-chart-row" : ""}`} 
-                    key={position.symbol}
-                    onClick={() => setActiveChartSymbol(position.symbol)}
-                    style={{ cursor: "pointer" }}
-                    title={`Klik untuk menampilkan grafik live ${position.symbol}`}
-                  >
-                    <strong>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
-                        {isCurrentChart && <span className="chart-symbol-pulse" style={{ width: "6px", height: "6px" }}></span>}
-                        {position.symbol}
-                      </span>
-                    </strong>
-                    <span className={amount >= 0 ? "up" : "down"}>{position.positionSide && position.positionSide !== "BOTH" ? position.positionSide : amount >= 0 ? "LONG" : "SHORT"}</span>
-                    <span>{formatNumber(position.positionAmt)}</span>
-                    <span>{formatPrice(position.entryPrice)}</span>
-                    <span>{formatPrice(position.markPrice)}</span>
-                    <span className={pnl >= 0 ? "up" : "down"}>{formatAnySignedUsd(pnlValue)}</span>
-                    <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.roePercent ?? position.pnlPercent)}</span>
-                    <span>{formatPrice(position.takeProfitPrice)}</span>
-                    <span>{formatPrice(position.stopLossPrice)}</span>
-                    <span>{formatPrice(position.liquidationPrice)}</span>
-                    <button
-                      className="tp-now-button"
-                      disabled={pnl <= 0 || isTpLoading}
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        takeProfitNow(position);
-                      }}
-                    >
-                      {isTpLoading ? "Closing" : pnl > 0 ? "TP Now" : "Wait Profit"}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="empty">Belum ada posisi aktif.</p>
-          )}
-        </section>
-
-        <section className="panel glass account-panel">
-          <header className="panel-head balance-headline">
-            <div>
-              <h2 style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                Account
-                <button
-                  type="button"
-                  onClick={() => setHideBalance(!hideBalance)}
-                  style={{ background: "transparent", border: "none", color: "var(--muted)", padding: 0 }}
-                  title="Toggle Balance Visibility"
-                >
-                  {hideBalance ? (
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
-                  ) : (
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                  )}
-                </button>
-              </h2>
-              <p>USDT/IDR {formatIdr(balanceSummary?.usdt_idr_rate || undefined)}</p>
-            </div>
-            <div className="segmented" aria-label="Pilih mata uang saldo">
-              {(["USDT", "IDR"] as const).map((currency) => (
-                <button
-                  className={balanceCurrency === currency ? "active" : ""}
-                  key={currency}
-                  type="button"
-                  onClick={() => setBalanceCurrency(currency)}
-                >
-                  {currency}
-                </button>
-              ))}
-            </div>
-          </header>
-          {accountError ? (
-            <div className="alert compact">Account private belum terbaca: {accountError}</div>
-          ) : null}
-          {visibleFuturesBalances.length ? (
-            <div className="balance-table">
-              <div className="balance-row balance-head">
-                <span>Asset</span>
-                <span>Wallet</span>
-                <span>Avail.</span>
-                <span>U-PnL</span>
-              </div>
-              {visibleFuturesBalances.map((balance) => {
-                const unrealizedValue = balance.unrealizedUsdt || balance.unrealizedProfit || "0";
-                return (
-                  <div className="balance-row" key={balance.asset}>
-                    <strong>{balance.asset}</strong>
-                    <span>{formatBalance(balance.walletUsdt ?? balance.walletBalance ?? balance.free, balance.walletIdr)}</span>
-                    <span>{formatBalance(balance.availableUsdt ?? balance.availableBalance ?? balance.free, balance.availableIdr)}</span>
-                    <span className={toneClass(showIdr ? balance.unrealizedIdr : unrealizedValue)}>{formatAnySignedUsd(unrealizedValue)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="empty">{accountError ? "Cek API key, private key RSA, permission Futures, atau IP restriction." : "Saldo Futures belum terbaca."}</p>
-          )}
-        </section>
-
-        <section className="panel glass signal-panel">
-          <header className="panel-head">
-            <div>
-              <h2>Signal</h2>
-              <p>Scan {signalSymbols.length} pair, refresh tiap {signalRefreshMs / 1000} detik.</p>
-            </div>
-            <div className="signal-actions">
-              <strong className={activeSignalCards.length ? "signal-badge buy" : "signal-badge"}>
-                {activeSignalCards.length ? `${activeSignalCards.length} SIGNAL` : "NO SIGNAL"}
-              </strong>
-            </div>
-          </header>
-          {signalError ? <div className="alert compact">{signalError}</div> : null}
-          {tradeMessage ? <div className="alert compact">{tradeMessage}</div> : null}
-          <div className="multi-signal-grid">
-            {activeSignalCards.length ? (
-              activeSignalCards.map((signal) => {
-                const score = signalScore(signal);
-                const confidence = Math.max(0, Math.min(100, Math.round((score / aiScoreMax) * 100)));
-                const isTrading = tradeLoadingSymbol === signal.symbol;
-                const isStrongSignal = score >= strongSignalThreshold;
-                const rsiStatus = rsiLabel(signal.rsi);
-                const rsiState = rsiTone(signal.rsi);
-                return (
-                  <article className={`signal-card ${signal.signal === "BUY" ? "buy" : "sell"}`} key={signal.symbol}>
-                    <div className="signal-card-head">
-                      <strong>{signal.symbol}</strong>
-                      <span>{signal.signal}</span>
-                    </div>
-                    <div className="signal-card-price">{formatPrice(signal.close)}</div>
-                    <div className="signal-card-meta">
-                      <span>Score {score}/{aiScoreMax}</span>
-                      <span>AI {confidence}%</span>
-                      <span>RSI {signal.rsi}</span>
-                    </div>
-                    <div className={`rsi-meter ${rsiState}`}>
-                      <div className="rsi-meter-head">
-                        <strong>{rsiStatus}</strong>
-                        <span>{signal.interval} RSI {signal.rsi}</span>
+            </header>
+            {signalError ? <div className="alert compact">{signalError}</div> : null}
+            {tradeMessage ? <div className="alert compact">{tradeMessage}</div> : null}
+            <div className="multi-signal-grid">
+              {activeSignalCards.length ? (
+                activeSignalCards.map((signal) => {
+                  const score = signalScore(signal);
+                  const confidence = Math.max(0, Math.min(100, Math.round((score / aiScoreMax) * 100)));
+                  const isTrading = tradeLoadingSymbol === signal.symbol;
+                  const isStrongSignal = score >= strongSignalThreshold;
+                  const rsiStatus = rsiLabel(signal.rsi);
+                  const rsiState = rsiTone(signal.rsi);
+                  return (
+                    <article className={`signal-card ${signal.signal === "BUY" ? "buy" : "sell"}`} key={signal.symbol}>
+                      <div className="signal-card-head">
+                        <strong>{signal.symbol}</strong>
+                        <span>{signal.signal}</span>
                       </div>
-                      <div className="rsi-track">
-                        <i style={{ width: `${rsiWidth(signal.rsi)}%` }} />
+                      <div className="signal-card-price">{formatPrice(signal.close)}</div>
+                      <div className="signal-card-meta">
+                        <span>Score {score}/{aiScoreMax}</span>
+                        <span>AI {confidence}%</span>
+                        <span>RSI {signal.rsi}</span>
                       </div>
-                      <div className="rsi-scale">
-                        <span>30 OS</span>
-                        <span>{signal.trend_interval || "Trend"} {signal.trend_rsi ? `RSI ${signal.trend_rsi}` : "RSI -"}</span>
-                        <span>70 OB</span>
-                      </div>
-                      {signal.rsi_regime?.enabled ? (
-                        <div className="rsi-thresholds">
-                          <span>Block L {signal.rsi_regime.long_block_above || "72"}</span>
-                          <span>Block S {signal.rsi_regime.short_block_below || "28"}</span>
+                      <div className={`rsi-meter ${rsiState}`}>
+                        <div className="rsi-meter-head">
+                          <strong>{rsiStatus}</strong>
+                          <span>{signal.interval} RSI {signal.rsi}</span>
                         </div>
-                      ) : null}
-                    </div>
-                    <p>{signal.reason}</p>
-                    <button
-                      className={`signal-trade-button ${signal.signal === "BUY" ? "buy" : "sell"}`}
-                      disabled={isTrading || !isStrongSignal}
-                      type="button"
-                      onClick={() => executeSignal(signal)}
-                    >
-                      {isTrading ? "Sending" : isStrongSignal ? `Entry ${signal.signal}` : `Wait Strong ${score}/${strongSignalThreshold}`}
-                    </button>
-                  </article>
-                );
-              })
-            ) : (
-              <div className="scan-strip">
-                {watchSignals.length ? (
-                  watchSignals.map((signal) => {
-                    const rsiStatus = rsiLabel(signal.rsi);
-                    const rsiState = rsiTone(signal.rsi);
-                    return (
+                        <div className="rsi-track">
+                          <i style={{ width: `${rsiWidth(signal.rsi)}%` }} />
+                        </div>
+                        <div className="rsi-scale">
+                          <span>30 OS</span>
+                          <span>{signal.trend_interval || "Trend"} {signal.trend_rsi ? `RSI ${signal.trend_rsi}` : "RSI -"}</span>
+                          <span>70 OB</span>
+                        </div>
+                        {signal.rsi_regime?.enabled ? (
+                          <div className="rsi-thresholds">
+                            <span>Block L {signal.rsi_regime.long_block_above || "72"}</span>
+                            <span>Block S {signal.rsi_regime.short_block_below || "28"}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                      <p>{signal.reason}</p>
                       <button
-                        className={`scan-rsi-card ${signal.symbol === autoSignal?.symbol ? "active" : ""}`}
-                        key={signal.symbol}
+                        className={`signal-trade-button ${signal.signal === "BUY" ? "buy" : "sell"}`}
+                        disabled={isTrading || !isStrongSignal}
                         type="button"
-                        onClick={() => {
-                          setAutoSignal(signal);
-                          setSelectedSymbol(signal.symbol);
-                          setActiveChartSymbol(signal.symbol);
+                        onClick={() => executeSignal(signal)}
+                      >
+                        {isTrading ? "Sending" : isStrongSignal ? `Entry ${signal.signal}` : `Wait Strong ${score}/${strongSignalThreshold}`}
+                      </button>
+                    </article>
+                  );
+                })
+              ) : (
+                <div className="scan-strip">
+                  {watchSignals.length ? (
+                    watchSignals.map((signal) => {
+                      const rsiStatus = rsiLabel(signal.rsi);
+                      const rsiState = rsiTone(signal.rsi);
+                      return (
+                        <button
+                          className={`scan-rsi-card ${signal.symbol === autoSignal?.symbol ? "active" : ""}`}
+                          key={signal.symbol}
+                          type="button"
+                          onClick={() => {
+                            setAutoSignal(signal);
+                            setSelectedSymbol(signal.symbol);
+                            setActiveChartSymbol(signal.symbol);
+                          }}
+                        >
+                          <div className="scan-rsi-head">
+                            <strong>{signal.symbol}</strong>
+                            <span>{signalScore(signal)}/{aiScoreMax}</span>
+                          </div>
+                          <div className={`rsi-meter compact ${rsiState}`}>
+                            <div className="rsi-meter-head">
+                              <strong>{rsiStatus}</strong>
+                              <span>{signal.interval} RSI {signal.rsi}</span>
+                            </div>
+                            <div className="rsi-track">
+                              <i style={{ width: `${rsiWidth(signal.rsi)}%` }} />
+                            </div>
+                            <div className="rsi-scale">
+                              <span>30</span>
+                              <span>{signal.trend_rsi ? `Trend ${signal.trend_rsi}` : "Trend -"}</span>
+                              <span>70</span>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="empty signal-empty">Belum ada data RSI dari backend.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Account Panel */}
+          <section className="panel glass account-panel">
+            <header className="panel-head balance-headline">
+              <div>
+                <h2 style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  Account
+                  <button
+                    type="button"
+                    onClick={() => setHideBalance(!hideBalance)}
+                    style={{ background: "transparent", border: "none", color: "var(--muted)", padding: 0 }}
+                    title="Toggle Balance Visibility"
+                  >
+                    {hideBalance ? (
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                    ) : (
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    )}
+                  </button>
+                </h2>
+                <p>USDT/IDR {formatIdr(balanceSummary?.usdt_idr_rate || undefined)}</p>
+              </div>
+              <div className="segmented" aria-label="Pilih mata uang saldo">
+                {(["USDT", "IDR"] as const).map((currency) => (
+                  <button
+                    className={balanceCurrency === currency ? "active" : ""}
+                    key={currency}
+                    type="button"
+                    onClick={() => setBalanceCurrency(currency)}
+                  >
+                    {currency}
+                  </button>
+                ))}
+              </div>
+            </header>
+            {accountError ? (
+              <div className="alert compact">Account private belum terbaca: {accountError}</div>
+            ) : null}
+            {visibleFuturesBalances.length ? (
+              <div className="balance-table">
+                <div className="balance-row balance-head">
+                  <span>Asset</span>
+                  <span>Wallet</span>
+                  <span>Avail.</span>
+                  <span>U-PnL</span>
+                </div>
+                {visibleFuturesBalances.map((balance) => {
+                  const unrealizedValue = balance.unrealizedUsdt || balance.unrealizedProfit || "0";
+                  return (
+                    <div className="balance-row" key={balance.asset}>
+                      <strong>{balance.asset}</strong>
+                      <span>{formatBalance(balance.walletUsdt ?? balance.walletBalance ?? balance.free, balance.walletIdr)}</span>
+                      <span>{formatBalance(balance.availableUsdt ?? balance.availableBalance ?? balance.free, balance.availableIdr)}</span>
+                      <span className={toneClass(showIdr ? balance.unrealizedIdr : unrealizedValue)}>{formatAnySignedUsd(unrealizedValue)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="empty">{accountError ? "Cek API key, private key RSA, permission Futures, atau IP restriction." : "Saldo Futures belum terbaca."}</p>
+            )}
+          </section>
+        </aside>
+
+        <main className="terminal-main">
+          {/* Live Chart & Candlesticks Panel */}
+          <section className="panel glass chart-panel">
+            <header className="panel-head chart-header">
+              <div>
+                <h2 className="chart-title">
+                  Live Chart & Candlesticks
+                  <div className="chart-symbol-badge chart-symbol-badge-futures">
+                    <span className="chart-symbol-pulse chart-symbol-pulse-futures"></span>
+                    <span className="chart-symbol-label">BINANCE FUTURES</span>
+                    <span className="chart-symbol-divider">|</span>
+                    <span>{chartSymbol}</span>
+                  </div>
+                </h2>
+                <p>
+                  {openPositions.length > 0
+                    ? "Menampilkan grafik entry yang sedang berjalan secara live."
+                    : "Pilih koin di panel scan untuk menampilkan grafiknya."}
+                </p>
+              </div>
+              <div className="chart-controls">
+                <div className="chart-input-group">
+                  <span className="chart-control-label">TV CHART ID:</span>
+                  <input
+                    className="chart-layout-input"
+                    type="text"
+                    placeholder="e.g. g8KjHs12"
+                    value={layoutId}
+                    onChange={(e) => handleSaveLayoutId(e.target.value)}
+                  />
+                </div>
+                
+                <div className="chart-input-group">
+                  <span className="chart-control-label">TIMEFRAME:</span>
+                  <div className="timeframe-selector" aria-label="Pilih timeframe chart">
+                    {[
+                      { label: "1m", value: "1" },
+                      { label: "3m", value: "3" },
+                      { label: "5m", value: "5" },
+                      { label: "15m", value: "15" },
+                      { label: "30m", value: "30" },
+                      { label: "1H", value: "60" },
+                      { label: "4H", value: "240" },
+                      { label: "1D", value: "D" },
+                    ].map((tf) => (
+                      <button
+                        className={chartTimeframe === tf.value ? "active" : ""}
+                        key={tf.value}
+                        type="button"
+                        onClick={() => setChartTimeframe(tf.value)}
+                      >
+                        {tf.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </header>
+            <div className="chart-wrapper">
+              {checked ? (
+                <TradingViewChart symbol={chartSymbol} timeframe={chartTimeframe} layoutId={layoutId} />
+              ) : (
+                <div className="chart-loading">
+                  <div className="chart-symbol-pulse chart-loading-pulse"></div>
+                  <span className="chart-loading-text">LOADING MARKET DATA...</span>
+                </div>
+              )}
+            </div>
+            <div className="chart-tip">
+              <span className="chart-tip-icon">Tip</span>
+              <span>
+                <strong>PRO-TIP UNTUK KODE SMC:</strong> Karena standard widget melarang pencarian indikator komunitas secara langsung, silakan buka <strong>tradingview.com</strong> di tab baru, buat chart dengan indikator <strong>&quot;LuxAlgo® - Price Action Concepts™&quot;</strong>, lalu <strong>Save Chart Layout</strong> tersebut dan pastikan opsi <strong>Sharing</strong> aktif. Copy kode layout ID dari URL-nya (contoh: <code>g8KjHs12</code> dari <code>https://www.tradingview.com/chart/g8KjHs12/</code>) dan paste di kolom <strong>&quot;TV CHART ID&quot;</strong> di atas. Chart kustom Anda dengan SMC LuxAlgo akan tampil otomatis!
+              </span>
+            </div>
+          </section>
+
+          {/* Open Positions Panel */}
+          <section className="panel glass positions-panel">
+            <header className="panel-head">
+              <div>
+                <h2>Open Positions</h2>
+                <p>Entry, mark, target TP/SL, ROE, dan liquidation refresh tiap {positionRefreshMs / 1000} detik.</p>
+              </div>
+            </header>
+            {positionMessage ? <div className="alert compact">{positionMessage}</div> : null}
+            {openPositions.length ? (
+              <div className="positions-table">
+                <div className="positions-row positions-head">
+                  <span>Pair</span>
+                  <span>Side</span>
+                  <span>Qty</span>
+                  <span>Entry</span>
+                  <span>Mark</span>
+                  <span>PnL</span>
+                  <span>ROE</span>
+                  <span>TP</span>
+                  <span>SL</span>
+                  <span>Liq.</span>
+                  <span>Action</span>
+                </div>
+                {openPositions.map((position) => {
+                  const amount = Number(position.positionAmt);
+                  const pnlValue = position.unRealizedProfit ?? position.unrealizedProfit ?? "0";
+                  const pnl = Number(pnlValue);
+                  const isTpLoading = tpLoadingSymbol === position.symbol;
+                  const isCurrentChart = position.symbol === chartSymbol;
+                  return (
+                    <div 
+                      className={`positions-row ${isCurrentChart ? "active-chart-row" : ""}`} 
+                      key={position.symbol}
+                      onClick={() => setActiveChartSymbol(position.symbol)}
+                      style={{ cursor: "pointer" }}
+                      title={`Klik untuk menampilkan grafik live ${position.symbol}`}
+                    >
+                      <strong>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                          {isCurrentChart && <span className="chart-symbol-pulse" style={{ width: "6px", height: "6px" }}></span>}
+                          {position.symbol}
+                        </span>
+                      </strong>
+                      <span className={amount >= 0 ? "up" : "down"}>{position.positionSide && position.positionSide !== "BOTH" ? position.positionSide : amount >= 0 ? "LONG" : "SHORT"}</span>
+                      <span>{formatNumber(position.positionAmt)}</span>
+                      <span>{formatPrice(position.entryPrice)}</span>
+                      <span>{formatPrice(position.markPrice)}</span>
+                      <span className={pnl >= 0 ? "up" : "down"}>{formatAnySignedUsd(pnlValue)}</span>
+                      <span className={pnl >= 0 ? "up" : "down"}>{formatPercent(position.roePercent ?? position.pnlPercent)}</span>
+                      <span>{formatPrice(position.takeProfitPrice)}</span>
+                      <span>{formatPrice(position.stopLossPrice)}</span>
+                      <span>{formatPrice(position.liquidationPrice)}</span>
+                      <button
+                        className="tp-now-button"
+                        disabled={pnl <= 0 || isTpLoading}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          takeProfitNow(position);
                         }}
                       >
-                        <div className="scan-rsi-head">
-                          <strong>{signal.symbol}</strong>
-                          <span>{signalScore(signal)}/{aiScoreMax}</span>
-                        </div>
-                        <div className={`rsi-meter compact ${rsiState}`}>
-                          <div className="rsi-meter-head">
-                            <strong>{rsiStatus}</strong>
-                            <span>{signal.interval} RSI {signal.rsi}</span>
-                          </div>
-                          <div className="rsi-track">
-                            <i style={{ width: `${rsiWidth(signal.rsi)}%` }} />
-                          </div>
-                          <div className="rsi-scale">
-                            <span>30</span>
-                            <span>{signal.trend_rsi ? `Trend ${signal.trend_rsi}` : "Trend -"}</span>
-                            <span>70</span>
-                          </div>
-                        </div>
+                        {isTpLoading ? "Closing" : pnl > 0 ? "TP Now" : "Wait Profit"}
                       </button>
-                    );
-                  })
-                ) : (
-                  <div className="empty signal-empty">Belum ada data RSI dari backend.</div>
-                )}
+                    </div>
+                  );
+                })}
               </div>
+            ) : (
+              <p className="empty">Belum ada posisi aktif.</p>
             )}
-          </div>
-        </section>
-      </section>
+          </section>
+        </main>
+      </div>
     </main>
   );
 }

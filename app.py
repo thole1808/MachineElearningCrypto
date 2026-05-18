@@ -114,6 +114,7 @@ def save_position_profit_memory(mem: dict[str, Decimal]) -> None:
 
 POSITION_PROFIT_MEMORY: dict[str, Decimal] = load_position_profit_memory()
 BINANCE_WS_MANAGER: BinanceWebSocketManager | None = None
+STARTUP_TIME = time.time()
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -1038,8 +1039,11 @@ class BinanceClient:
     def open_orders_rest(self, symbol: str | None = None) -> list[dict]:
         if self.dry_run():
             return []
-        target_symbol = normalize_symbol(symbol or self.symbol)
-        rows = self.signed_get("/fapi/v1/openOrders", {"symbol": target_symbol})
+        if symbol:
+            target_symbol = normalize_symbol(symbol)
+            rows = self.signed_get("/fapi/v1/openOrders", {"symbol": target_symbol})
+        else:
+            rows = self.signed_get("/fapi/v1/openOrders")
         if isinstance(rows, list):
             return rows
         return []
@@ -1992,33 +1996,35 @@ def cancel_stale_limit_orders(symbols: list[str]) -> None:
     if max_age_seconds <= 0:
         return
     now_ms = int(time.time() * 1000)
-    for symbol in symbols:
-        try:
-            client = BinanceClient(symbol=symbol)
-            for order in client.open_orders(symbol):
-                order_type = str(order.get("type", "")).upper()
-                reduce_only = str(order.get("reduceOnly", "false")).lower() == "true"
-                close_position = str(order.get("closePosition", "false")).lower() == "true"
-                client_order_id = str(order.get("clientOrderId", ""))
-                if order_type != "LIMIT" or reduce_only or close_position:
-                    continue
-                if not client_order_id.startswith("mecbot_"):
-                    continue
-                order_time = int(order.get("time", order.get("updateTime", "0")) or "0")
-                age_seconds = int((now_ms - order_time) / 1000) if order_time > 0 else max_age_seconds + 1
-                if age_seconds < max_age_seconds:
-                    continue
-                order_id = order.get("orderId")
-                result = client.cancel_order(symbol, order_id)
-                print(f"[CANCEL STALE LIMIT] {symbol} order={order_id} age={age_seconds}s result={json.dumps(result, ensure_ascii=False)}")
-                send_telegram(
-                    f"<b>CANCEL LIMIT ORDER</b>\n"
-                    f"{symbol}\n"
-                    f"Order: {order_id}\n"
-                    f"Age: {age_seconds}s"
-                )
-        except Exception as error:
-            print(f"[CANCEL STALE LIMIT ERROR] {symbol}: {error}")
+    try:
+        client = BinanceClient()
+        all_orders = client.open_orders_rest(None)
+        for order in all_orders:
+            order_type = str(order.get("type", "")).upper()
+            reduce_only = str(order.get("reduceOnly", "false")).lower() == "true"
+            close_position = str(order.get("closePosition", "false")).lower() == "true"
+            client_order_id = str(order.get("clientOrderId", ""))
+            order_symbol = str(order.get("symbol", "")).upper()
+            
+            if order_type != "LIMIT" or reduce_only or close_position:
+                continue
+            if not client_order_id.startswith("mecbot_"):
+                continue
+            order_time = int(order.get("time", order.get("updateTime", "0")) or "0")
+            age_seconds = int((now_ms - order_time) / 1000) if order_time > 0 else max_age_seconds + 1
+            if age_seconds < max_age_seconds:
+                continue
+            order_id = order.get("orderId")
+            result = client.cancel_order(order_symbol, order_id)
+            print(f"[CANCEL STALE LIMIT] {order_symbol} order={order_id} age={age_seconds}s result={json.dumps(result, ensure_ascii=False)}")
+            send_telegram(
+                f"<b>CANCEL LIMIT ORDER</b>\n"
+                f"{order_symbol}\n"
+                f"Order: {order_id}\n"
+                f"Age: {age_seconds}s"
+            )
+    except Exception as error:
+        print(f"[CANCEL STALE LIMIT ERROR] {error}")
 
 
 def monitor_open_positions(symbols: list[str]) -> int:
@@ -2059,6 +2065,12 @@ def monitor_open_positions(symbols: list[str]) -> int:
             if profit_key not in POSITION_PROFIT_MEMORY or peak_profit > POSITION_PROFIT_MEMORY[profit_key]:
                 POSITION_PROFIT_MEMORY[profit_key] = peak_profit
                 save_position_profit_memory(POSITION_PROFIT_MEMORY)
+
+            # MASA TENGGANG STARTUP (GRACE PERIOD): Jangan force close posisi yang sedang running dalam 60 detik awal setelah start-web.sh dijalankan
+            startup_grace_period = 60
+            if time.time() - STARTUP_TIME < startup_grace_period:
+                print(f"[STARTUP GRACE] Melewati pengecekan force close untuk {position_symbol} (Masa tenggang startup {int(startup_grace_period - (time.time() - STARTUP_TIME))} detik)")
+                continue
                 
             update_time_ms = int(position.get("updateTime", "0") or "0")
             hold_seconds = int(time.time() - (update_time_ms / 1000)) if update_time_ms > 0 else max_hold_seconds
